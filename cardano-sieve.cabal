@@ -1,0 +1,106 @@
+cabal-version:      3.0
+name:               cardano-sieve
+version:            0.1.0.0
+synopsis:           Pattern-filtered chain index for Cardano
+description:
+  A chain-index for Cardano: given a set of patterns, it tracks every
+  matching UTxO — when it was created, when it was spent, and by what.
+  Single-threaded pipelined indexing architecture (ADR-020).
+license:            Apache-2.0
+author:             Jordan Millar
+maintainer:         jordan.millar@iohk.io
+build-type:         Simple
+
+common project-config
+  default-language: Haskell2010
+  ghc-options:
+    -- Explicit -O2; cabal defaults to -O1.
+    -O2
+    -Wall -Wcompat -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wredundant-constraints
+    -Wunused-packages
+
+library
+  import:          project-config
+  hs-source-dirs:  src
+  autogen-modules: Paths_cardano_sieve
+  other-modules:   Paths_cardano_sieve
+  exposed-modules: Cardano.Sieve
+                   Cardano.Sieve.Server.Api.Checkpoints
+                   Cardano.Sieve.Server.Api.Common
+                   Cardano.Sieve.Server.Api.Datums
+                   Cardano.Sieve.Server.Api.Health
+                   Cardano.Sieve.Server.Api.Matches
+                   Cardano.Sieve.Server.Api.Metadata
+                   Cardano.Sieve.Server.Api.Patterns
+                   Cardano.Sieve.Server.Api.Scripts
+                   Cardano.Sieve.Server.Run
+                   Cardano.Sieve.Database.DirtyFlag
+                   Cardano.Sieve.Selector
+                   Cardano.Sieve.Value
+                   Cardano.Sieve.Database.Schema
+                   Cardano.Sieve.Node.BlockAtSlot
+                   Cardano.Sieve.Node.Decode
+                   Cardano.Sieve.Node.Encode
+                   Cardano.Sieve.Node.Fetch
+                   Cardano.Sieve.Node.Insert
+                   Cardano.Sieve.Node.Progress
+  build-depends:
+    , aeson                    >=2.2
+    , async                    ^>=2.2
+    , base                     >=4.14
+    , base16-bytestring        ^>=1.0
+    , bech32                    ^>=1.1
+    , bytestring               ^>=0.12
+    , cborg                    ^>=0.2
+    , cardano-api              >=11.2
+    , cardano-ledger-alonzo
+    , cardano-ledger-babbage
+    , cardano-ledger-core
+    , containers               ^>=0.7
+    , http-api-data            ^>=0.6
+    , cardano-slotting         ^>=0.2
+    , microlens                ^>=0.4
+    , optparse-applicative     ^>=0.19
+    , ouroboros-network:protocols ^>=1.2
+    , servant-server
+    , sqlite-simple            ^>=0.4
+    , text                     ^>=2.1
+    , time                     ^>=1.12
+    , typed-protocols          ^>=1.2
+    , unix                     ^>=2.8
+    , wai
+    , warp
+
+executable cardano-sieve
+  import:         project-config
+  hs-source-dirs: app
+  main-is:        Main.hs
+  -- -threaded: warp (the query server) needs the threaded RTS. No -N, so the
+  -- default stays one capability — the single-threaded indexer (ADR-020) and its
+  -- benchmark characteristics are unchanged; -N can still be given via +RTS.
+  ghc-options:    -threaded -rtsopts
+  build-depends:
+    , base >=4.14
+    , cardano-sieve
+
+test-suite cardano-sieve-test
+  import:         project-config
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Main.hs
+  build-depends:
+    , base            >=4.14
+    , bytestring      ^>=0.12
+    , cardano-api     >=11.2
+    , cardano-api:gen >=11.2
+    , cardano-sieve
+    , containers      ^>=0.7
+    , directory       ^>=1.3
+    , filepath        ^>=1.4
+    , hedgehog
+    , sqlite-simple   ^>=0.4
+    , tasty           ^>=1.5
+    , tasty-hedgehog
+    , tasty-hunit     ^>=0.10
+    , text            ^>=2.1
