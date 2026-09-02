@@ -65,8 +65,8 @@ newProgress = do
 --
 -- @target@ is the slot the sync is heading for, when known — @--until@ for a
 -- bounded run, the server's tip for a following one — and drives the percentage.
-tick :: IORef Progress -> SlotNo -> Maybe SlotNo -> Int -> Int -> IO ()
-tick ref slotNo target outputs spends = do
+tick :: IORef Progress -> SlotNo -> Maybe SlotNo -> String -> Int -> Int -> IO ()
+tick ref slotNo target era outputs spends = do
   now <- getMonotonicTime
   pg <- readIORef ref
   let folded =
@@ -85,7 +85,7 @@ tick ref slotNo target outputs spends = do
           , pgBlocksAtReport = pgBlocks folded
           , pgSlotAtReport = unSlotNo slotNo
           }
-      logLine (progressLine folded now slotNo target)
+      logLine (progressLine folded now slotNo target era)
 
 -- | The heartbeat line, e.g.
 --
@@ -94,8 +94,8 @@ tick ref slotNo target outputs spends = do
 -- and once there is no target left to head for:
 --
 -- > 14:48:19  at tip    slot 3,999,989  12 blk/s  blocks 1,204,551  outputs 8,418,337  spends 7,205,118  elapsed 26m12s
-progressLine :: Progress -> Double -> SlotNo -> Maybe SlotNo -> String
-progressLine pg now slotNo target =
+progressLine :: Progress -> Double -> SlotNo -> Maybe SlotNo -> String -> String
+progressLine pg now slotNo target era =
   case target of
     Just t | unSlotNo t > unSlotNo slotNo -> heading t
     -- No target, or we have caught up with it. A percentage and an ETA are
@@ -106,6 +106,8 @@ progressLine pg now slotNo target =
   heading t =
     "syncing   "
       <> pad 6 (showFFloat (Just 1) (100 * ratio t) "%")
+      <> "  "
+      <> era
       <> "  slot "
       <> commas (unSlotNo slotNo)
       <> "/"
@@ -117,7 +119,9 @@ progressLine pg now slotNo target =
       <> counters
 
   atTip =
-    "at tip    slot "
+    "at tip    "
+      <> era
+      <> "  slot "
       <> commas (unSlotNo slotNo)
       <> "  "
       <> commas (round rate :: Word64)

@@ -236,7 +236,7 @@ sieveBlock
   -> Maybe SlotNo
   -> BlockInMode
   -> IO BlockHeader
-sieveBlock dbHandle progress redeemerCapture policyIndexing selectors target blockInMode@(BlockInMode _ block) = do
+sieveBlock dbHandle progress redeemerCapture policyIndexing selectors target blockInMode@(BlockInMode cera block) = do
   let header = getBlockHeader block
       BlockHeader slotNo hash _blockNo = header
       selected = selectedStored selectors blockInMode
@@ -249,7 +249,7 @@ sieveBlock dbHandle progress redeemerCapture policyIndexing selectors target blo
     selected
     spent
     (datumsAndScriptsInBlock blockInMode)
-  tick progress slotNo target (length selected) (length spent)
+  tick progress slotNo target (show cera) (length selected) (length spent)
   pure header
 
 -- | Whether the deferred query indexes have been built yet. The follower builds
