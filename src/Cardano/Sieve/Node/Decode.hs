@@ -114,6 +114,7 @@ outputsInTx txIx (ShelleyTx sbe ledgerTx) =
           ShelleyBasedEraAlonzo -> hashDatum (o ^. L.datumTxOutF)
           ShelleyBasedEraBabbage -> hashDatum (o ^. L.datumTxOutF)
           ShelleyBasedEraConway -> hashDatum (o ^. L.datumTxOutF)
+          ShelleyBasedEraDijkstra -> hashDatum (o ^. L.datumTxOutF)
          where
           -- 'datumTxOutF' yields the FULL datum, so an inline datum is hashed here
           -- rather than reported as absent — and which branch we took is exactly
@@ -132,6 +133,7 @@ outputsInTx txIx (ShelleyTx sbe ledgerTx) =
           ShelleyBasedEraAlonzo -> Nothing
           ShelleyBasedEraBabbage -> hashRefScript (o ^. L.referenceScriptTxOutL)
           ShelleyBasedEraConway -> hashRefScript (o ^. L.referenceScriptTxOutL)
+          ShelleyBasedEraDijkstra -> hashRefScript (o ^. L.referenceScriptTxOutL)
          where
           hashRefScript ms = case ms of
             L.SNothing -> Nothing
@@ -167,6 +169,11 @@ outputsInTx txIx (ShelleyTx sbe ledgerTx) =
               L.SJust o -> [mkOutput (fromIntegral (length txOuts)) (TxOut o)]
               L.SNothing -> []
           ShelleyBasedEraConway -> case ledgerTx ^. isPhase2ValidTxL of
+            Phase2Valid -> txOutputs
+            Phase2Invalid -> case ledgerTx ^. L.bodyTxL . collateralReturnTxBodyL of
+              L.SJust o -> [mkOutput (fromIntegral (length txOuts)) (TxOut o)]
+              L.SNothing -> []
+          ShelleyBasedEraDijkstra -> case ledgerTx ^. isPhase2ValidTxL of
             Phase2Valid -> txOutputs
             Phase2Invalid -> case ledgerTx ^. L.bodyTxL . collateralReturnTxBodyL of
               L.SJust o -> [mkOutput (fromIntegral (length txOuts)) (TxOut o)]
@@ -213,6 +220,9 @@ datumsAndScriptsInTx (ShelleyTx sbe ledgerTx) =
           ShelleyBasedEraConway ->
             datumsOfWits (ledgerTx ^. L.witsTxL . datsTxWitsL)
               <> concatMap (datumOfOut . (^. L.datumTxOutF)) outs
+          ShelleyBasedEraDijkstra ->
+            datumsOfWits (ledgerTx ^. L.witsTxL . datsTxWitsL)
+              <> concatMap (datumOfOut . (^. L.datumTxOutF)) outs
 
         -- Scripts: the witness set in every era, plus output reference scripts
         -- from Babbage. Each stored blob is @scriptPrefixTag s <> originalBytes s@
@@ -230,6 +240,8 @@ datumsAndScriptsInTx (ShelleyTx sbe ledgerTx) =
               ShelleyBasedEraBabbage ->
                 [scriptRow (L.hashScript s) s | o <- outs, L.SJust s <- [o ^. L.referenceScriptTxOutL]]
               ShelleyBasedEraConway ->
+                [scriptRow (L.hashScript s) s | o <- outs, L.SJust s <- [o ^. L.referenceScriptTxOutL]]
+              ShelleyBasedEraDijkstra ->
                 [scriptRow (L.hashScript s) s | o <- outs, L.SJust s <- [o ^. L.referenceScriptTxOutL]]
      in DatumsAndScripts datums scripts
 
@@ -296,6 +308,10 @@ txSpends capture (ShelleyTx sbe ledgerTx) =
             consumedInputs
               (ledgerTx ^. isPhase2ValidTxL)
               (F.toList (ledgerTx ^. L.bodyTxL . L.collateralInputsTxBodyL))
+          ShelleyBasedEraDijkstra ->
+            consumedInputs
+              (ledgerTx ^. isPhase2ValidTxL)
+              (F.toList (ledgerTx ^. L.bodyTxL . L.collateralInputsTxBodyL))
         -- Redeemers exist from Alonzo onwards. 'mkSpendingPurpose' is a method of
         -- @AlonzoEraScript@, so the call sits inside the concrete branches — but
         -- unlike the per-era constructors it is one expression for all three.
@@ -308,6 +324,7 @@ txSpends capture (ShelleyTx sbe ledgerTx) =
             ShelleyBasedEraAlonzo -> lookupSpend (ledgerTx ^. L.witsTxL . rdmrsTxWitsL)
             ShelleyBasedEraBabbage -> lookupSpend (ledgerTx ^. L.witsTxL . rdmrsTxWitsL)
             ShelleyBasedEraConway -> lookupSpend (ledgerTx ^. L.witsTxL . rdmrsTxWitsL)
+            ShelleyBasedEraDijkstra -> lookupSpend (ledgerTx ^. L.witsTxL . rdmrsTxWitsL)
      in zipWith
           ( \ix li ->
               SpentInput
