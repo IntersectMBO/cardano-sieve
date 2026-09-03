@@ -260,7 +260,7 @@ data IndexState = IndexesPending | IndexesBuilt
 -- slot, inclusive: the last slot the run indexes.
 --
 -- Two phases rather than one, because @SendMsgDone@ is only legal with nothing
--- in flight: on reaching the bound the client is still owed the ~50 responses it
+-- in flight: on reaching the bound the client is still owed the 'maxInFlight' responses it
 -- pipelined ahead, and must collect them all before it may finish.
 data BoundedPhase
   = -- | Before the bound: consult 'pipelineDecisionMax', request more, and write
@@ -269,6 +269,17 @@ data BoundedPhase
   | -- | Past the bound: request nothing, discard what arrives, and finish once
     -- the pipeline is empty.
     Draining
+
+-- | ChainSync pipelining depth: requests sent and not yet collected.
+--
+-- Bulk sync is the case this bounds. Each in-flight request costs one
+-- unanswered response buffered below the application, so depth trades memory
+-- for the node's round-trip latency being hidden. 200 blocks of mainnet is a
+-- few tens of MiB against a 90 MiB process.
+--
+-- Shared by both clients so the two cannot drift apart.
+maxInFlight :: Word16
+maxInFlight = 200
 
 -- $pipelining
 --
@@ -295,8 +306,8 @@ data BoundedPhase
 --   * __@n >= maxInFlight@__ — the pipeline is full. This is the bulk-sync case.
 --   * __@clientTip + n >= serverTip@__ — the blocks already asked for would carry
 --     us to the node's tip, so there is no point asking for more. This is what
---     makes the client /drain/ as it approaches the tip instead of sitting on 50
---     unanswered requests.
+--     makes the client /drain/ as it approaches the tip instead of sitting on
+--     'maxInFlight' unanswered requests.
 --
 -- The consequence worth internalising: far from the tip the client settles into
 -- collect-one, request-one at @n = maxInFlight@, so @Collect@ comes back on
@@ -383,13 +394,13 @@ data BoundedPhase
 -- everything it currently has. Two ways to get there:
 --
 --   * __At the tip__ — the common case. We asked for the next block and it does
---     not exist yet. Outstanding requests sit near 1 rather than 50, because
+--     not exist yet. Outstanding requests sit near 1 rather than 'maxInFlight', because
 --     'pipelineDecisionMax' stops pipelining past the server's tip. Every block
 --     therefore commits on its own, and a query sees the chain as of the last
 --     block instead of the last 'dbBatchSize' boundary.
 --
 --   * __Starved during bulk sync__ — the node failed to deliver even the oldest
---     of ~50 outstanding requests. Should be rare against a local node serving
+--     of the 'maxInFlight' outstanding requests. Should be rare against a local node serving
 --     from disk. If it is NOT rare, bulk sync degrades towards a commit per
 --     block.
 --
@@ -431,9 +442,6 @@ followingClient dbHandle progress redeemerCapture selectors since =
     points <- startPoints dbHandle since
     pure (clientIntersect built points)
  where
-  maxInFlight :: Word16
-  maxInFlight = 50
-
   clientIntersect built points =
     CSP.SendMsgFindIntersect points $
       CSP.ClientPipelinedStIntersect
@@ -537,9 +545,6 @@ boundedClient
 boundedClient dbHandle progress redeemerCapture selectors since untilSlot =
   CSP.ChainSyncClientPipelined (clientIntersect <$> startPoints dbHandle since)
  where
-  maxInFlight :: Word16
-  maxInFlight = 50
-
   -- Resumes exactly as 'followingClient' does. A bounded run is the one most
   -- likely to be repeated with a larger --until, so re-reading the whole range
   -- each time is the most wasteful place to skip this.
