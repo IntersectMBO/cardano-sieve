@@ -27,6 +27,12 @@ import Cardano.Api
   , deserialiseFromRawBytesHex
   )
 
+import Cardano.Sieve.CardanoRpc.Endpoint
+  ( RpcEndpoint (RpcUnixSocket)
+  , defaultRpcSocketFor
+  , parseRpcAddress
+  )
+import Cardano.Sieve.CardanoRpc.Follow (followTip)
 import Cardano.Sieve.Node.Fetch (fetch, fetchBounded)
 import Cardano.Sieve.Node.Insert
   ( Durability (Durable, UnsafeBulk)
@@ -39,7 +45,7 @@ import Cardano.Sieve.Selector (Selector, selectorFromText)
 import Cardano.Sieve.Server.Run (runServer)
 import Cardano.Slotting.Slot (SlotNo (SlotNo))
 
-import Control.Applicative (many, optional)
+import Control.Applicative (many, optional, (<|>))
 import Control.Concurrent (myThreadId)
 import Control.Concurrent.Async (race_)
 import Control.Exception (AsyncException (UserInterrupt), bracket, throwTo)
@@ -110,12 +116,26 @@ data Command
     -- when it lands rather than inherit one by accident.
     Serve Int
 
+-- | Which producer feeds the indexer.
+--
+-- The two are mutually exclusive per run and carry different connection
+-- details, so they are a sum rather than a pair of 'Maybe's: it is not possible
+-- to construct a sync with both or neither.
+data SyncSource
+  = -- | Node-to-client ChainSync: socket and the network's magic.
+    FromChainSync SocketPath NetworkId
+  | -- | UTxO RPC over gRPC. No network id: nothing on that path needs one.
+    FromCardanoRpc RpcEndpoint
+
 -- | The inputs only the indexing path needs.
 data SyncOptions = SyncOptions
-  { syNode :: SocketPath
-  -- ^ Node-to-client socket of the local node to follow.
-  , syNetwork :: NetworkId
-  -- ^ Network of that node (its testnet magic).
+  { sySource :: SyncSource
+  -- ^ Where blocks come from.
+  , syNodeForQueries :: Maybe (SocketPath, NetworkId)
+  -- ^ Node the query server may use for @\/health@'s tip and @\/metadata@,
+  -- which still speak node-to-client. Present whenever a socket and magic were
+  -- given, independently of which producer is syncing; 'Nothing' makes the
+  -- server report a disconnected node, exactly as serve-only mode does.
   , syBatchSize :: Int
   -- ^ Commit to SQLite every this many written rows.
   , sySelectors :: [Selector]
@@ -149,6 +169,8 @@ data Invocation = Invocation
 data RawOptions = RawOptions
   { rawSocketPath :: Maybe SocketPath
   , rawNetworkId :: Maybe NetworkId
+  , rawRpcEndpoint :: Maybe RpcEndpoint
+  , rawViaRpc :: Bool
   , rawDatabasePath :: FilePath
   , rawBatchSize :: Int
   , rawSelectors :: [Selector]
@@ -204,23 +226,28 @@ sieve = do
       -- this mode forgoes the bulk-speed trade.
       race_
         (runSyncCommand Durable db sync)
-        (runServer (Just (syNode sync, syNetwork sync)) db port)
+        (runServer (syNodeForQueries sync) db port)
  where
   runSyncCommand
     durability
     db
     SyncOptions
-      { syNode = node
-      , syNetwork = network
+      { sySource = source
       , syBatchSize = batch
       , sySelectors = selectors
       , sySince = since
       , syUntil = until_
       , syRedeemers = capture
       } =
-      case until_ of
-        Nothing -> fetch node network db batch durability capture selectors since
-        Just u -> fetchBounded node network db batch durability capture selectors since u
+      case (source, until_) of
+        (FromChainSync node network, Nothing) ->
+          fetch node network db batch durability capture selectors since
+        (FromChainSync node network, Just u) ->
+          fetchBounded node network db batch durability capture selectors since u
+        -- 'invocationOf' has already rejected --until here, so the bound cannot
+        -- be present.
+        (FromCardanoRpc endpoint, _) ->
+          followTip endpoint db batch durability capture selectors since
 
 -- | Check a parsed command line for coherence and resolve it into the mode it
 -- names. The parser accepts each option in isolation; this is where the
@@ -244,17 +271,29 @@ invocationOf raw =
     -- other node options are ignored rather than rejected: scripts pass them
     -- uniformly across invocations, and refusing would break that for no gain.
     | Just port <- rawServePort raw
-    , Nothing <- rawSocketPath raw =
+    , Nothing <- rawSocketPath raw
+    , Nothing <- rawRpcEndpoint raw
+    , False <- rawViaRpc raw =
         Right (Serve port)
     | otherwise = Sync <$> syncOptions <*> pure (rawServePort raw)
 
   syncOptions = do
-    node <- required "--socket-path" (rawSocketPath raw)
-    network <- required "--testnet-magic" (rawNetworkId raw)
+    source <- syncSource
+    -- --until is a bounded run, which the gRPC producer does not implement:
+    -- FollowTip has no stopping condition of its own. Caught here rather than
+    -- at dispatch so it fails before the database is even opened.
+    case source of
+      FromCardanoRpc{}
+        | Just _ <- rawUntilSlot raw ->
+            Left
+              "--until is not supported when syncing over UTxO RPC (--rpc-socket-path/--rpc-address/--via-rpc)"
+      _ -> Right ()
     pure
       SyncOptions
-        { syNode = node
-        , syNetwork = network
+        { sySource = source
+        , -- Independent of the producer: the query server still speaks
+          -- node-to-client, so it gets the node pair whenever one was given.
+          syNodeForQueries = (,) <$> rawSocketPath raw <*> rawNetworkId raw
         , syBatchSize = rawBatchSize raw
         , -- Passed through EMPTY when no --select is given, rather than
           -- defaulted to the wildcard here. Empty has to survive as far as
@@ -267,10 +306,26 @@ invocationOf raw =
         , syRedeemers = if rawWithRedeemers raw then CaptureRedeemers else SkipRedeemers
         }
 
+  -- An explicit RPC endpoint wins; --via-rpc derives one from the node socket,
+  -- since cardano-rpc's default is a socket beside it and typing that path out
+  -- is pure ceremony. Otherwise it is a ChainSync run, which needs both node
+  -- options as it always did.
+  syncSource = case (rawRpcEndpoint raw, rawViaRpc raw) of
+    (Just endpoint, _) -> Right (FromCardanoRpc endpoint)
+    (Nothing, True) ->
+      FromCardanoRpc . RpcUnixSocket . defaultRpcSocketFor . (\(File path) -> path)
+        <$> required'
+          "--via-rpc needs --socket-path to derive the rpc socket path (or give --rpc-socket-path)"
+          (rawSocketPath raw)
+    (Nothing, False) ->
+      FromChainSync
+        <$> required "--socket-path" (rawSocketPath raw)
+        <*> required "--testnet-magic" (rawNetworkId raw)
+
   required flag =
-    maybe
-      (Left (flag <> " is required to sync (omit it, with --serve, to serve an existing database)"))
-      Right
+    required' (flag <> " is required to sync (omit it, with --serve, to serve an existing database)")
+
+  required' message = maybe (Left message) Right
 
 optionsInfo :: ParserInfo RawOptions
 optionsInfo =
@@ -289,6 +344,8 @@ optionsParser =
   RawOptions
     <$> pSocketPath
     <*> pNetworkId
+    <*> pRpcEndpoint
+    <*> pViaRpc
     <*> pDatabasePath
     <*> pBatchSize
     <*> pSelectors
@@ -310,6 +367,36 @@ optionsParser =
               <> metavar "FILEPATH"
               <> help "Path to the local node's node-to-client socket (required to sync)"
           )
+
+  -- Three ways to name the gRPC producer, because the endpoint has three
+  -- shapes in practice: a socket path, a host and port, or "the default one",
+  -- which cardano-rpc puts beside the node socket and which would otherwise
+  -- have to be typed out in full every time.
+  pRpcEndpoint :: Parser (Maybe RpcEndpoint)
+  pRpcEndpoint = optional (rpcSocket <|> rpcAddress)
+   where
+    rpcSocket =
+      RpcUnixSocket
+        <$> strOption
+          ( long "rpc-socket-path"
+              <> metavar "FILEPATH"
+              <> help
+                "Sync over UTxO RPC (gRPC) from this unix socket, instead of node-to-client ChainSync"
+          )
+    rpcAddress =
+      option
+        (eitherReader parseRpcAddress)
+        ( long "rpc-address"
+            <> metavar "HOST:PORT"
+            <> help "Sync over UTxO RPC (gRPC) from this address, instead of node-to-client ChainSync"
+        )
+
+  pViaRpc :: Parser Bool
+  pViaRpc =
+    switch
+      ( long "via-rpc"
+          <> help "Sync over UTxO RPC using rpc.sock beside --socket-path"
+      )
 
   pNetworkId :: Parser (Maybe NetworkId)
   pNetworkId =

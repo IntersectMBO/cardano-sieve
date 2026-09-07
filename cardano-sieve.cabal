@@ -10,6 +10,8 @@ license:            Apache-2.0
 author:             Jordan Millar
 maintainer:         jordan.millar@iohk.io
 build-type:         Simple
+extra-source-files: test/golden/*.cbor
+                    test/golden/*.cbor.gz
 
 common project-config
   default-language: Haskell2010
@@ -39,6 +41,10 @@ library
                    Cardano.Sieve.Selector
                    Cardano.Sieve.Value
                    Cardano.Sieve.Database.Schema
+                   Cardano.Sieve.CardanoRpc.Decode
+                   Cardano.Sieve.CardanoRpc.Endpoint
+                   Cardano.Sieve.CardanoRpc.Follow
+                   Cardano.Sieve.CardanoRpc.Response
                    Cardano.Sieve.Node.BlockAtSlot
                    Cardano.Sieve.Node.Decode
                    Cardano.Sieve.Node.Encode
@@ -54,14 +60,19 @@ library
     , bytestring               ^>=0.12
     , cborg                    ^>=0.2
     , cardano-api              >=11.2
+    , cardano-rpc
     , cardano-ledger-alonzo
     , cardano-ledger-babbage
     , cardano-ledger-core
     , containers               ^>=0.7
+    , data-default             ^>=0.8
+    , filepath                 ^>=1.4
+    , grapesy                  ^>=1.1
     , http-api-data            ^>=0.6
     , cardano-slotting         ^>=0.2
     , microlens                ^>=0.4
     , optparse-applicative     ^>=0.19
+    , ouroboros-consensus
     , ouroboros-network:protocols ^>=1.2
     , servant-server
     , sqlite-simple            ^>=0.4
@@ -104,3 +115,4 @@ test-suite cardano-sieve-test
     , tasty-hedgehog
     , tasty-hunit     ^>=0.10
     , text            ^>=2.1
+    , zlib            ^>=0.7

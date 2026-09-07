@@ -23,6 +23,12 @@
 module Cardano.Sieve.Node.Fetch
   ( fetch
   , fetchBounded
+
+    -- * Shared with the UTxO RPC producer
+    -- $sharedWithRpc
+  , sieveBlock
+  , startPoints
+  , describeSelectors
   )
 where
 
@@ -269,6 +275,14 @@ data BoundedPhase
   | -- | Past the bound: request nothing, discard what arrives, and finish once
     -- the pipeline is empty.
     Draining
+
+-- $sharedWithRpc
+--
+-- "Cardano.Sieve.CardanoRpc.Follow" indexes the same chain over gRPC and needs
+-- these three. They are exported rather than copied because each encodes a
+-- policy that must not differ between the two producers: which checkpoints are
+-- offered when resuming, how a block becomes rows, and what the startup banner
+-- claims is being indexed. The transports differ; these do not.
 
 -- $pipelining
 --
