@@ -13,10 +13,11 @@ module Main (main) where
 
 import Cardano.Api
   ( AddressAny
-  , AdaAssetId
   , AsType (AsAddressAny, AsAssetName, AsHash, AsPaymentKey, AsScriptHash, AsStakeKey, AsTxId)
-  , AssetId (AssetId)
+  , AssetId (AdaAssetId, AssetId)
   , AssetName
+  , BlockHeader (BlockHeader)
+  , BlockInMode (BlockInMode)
   , Hash
   , NetworkId (Mainnet)
   , PaymentCredential (PaymentCredentialByKey, PaymentCredentialByScript)
@@ -25,6 +26,7 @@ import Cardano.Api
   , Quantity (Quantity)
   , ScriptHash
   , SerialiseAsRawBytes
+  , SlotNo (SlotNo)
   , StakeAddress
   , StakeAddressReference (NoStakeAddress, StakeAddressByValue)
   , StakeCredential (StakeCredentialByKey)
@@ -35,6 +37,7 @@ import Cardano.Api
   , Value
   , deserialiseAddress
   , deserialiseFromRawBytes
+  , getBlockHeader
   , makeShelleyAddress
   , makeStakeAddress
   , serialiseAddress
@@ -43,6 +46,12 @@ import Cardano.Api
   , toAddressAny
   )
 
+import Cardano.Sieve.CardanoRpc.Decode
+  ( BlockDecodeError (TrailingBytes)
+  , cardanoCodecConfig
+  , decodeNativeBytes
+  , mainnetByronEpochSlots
+  )
 import Cardano.Sieve.Node.Insert
   ( DbHandle (dbConn)
   , DirtyDatabase
@@ -75,16 +84,19 @@ import Cardano.Sieve.Selector
 import Cardano.Sieve.Server.Api.Matches (Cursor (..), cursorFromText, cursorToText)
 import Cardano.Sieve.Value (decodeValue, encodeValue)
 
+import Codec.Compression.GZip qualified as GZip
 import Control.Exception (bracket, bracket_, try)
 import Control.Monad (when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.List (sortOn)
+import Data.ByteString.Lazy qualified as LBS
+import Data.List (isInfixOf, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Word (Word64)
 import Database.SQLite.Simple (Connection, Only (Only), Query, execute_, query_, withConnection)
 import GHC.Exts (fromList)
 import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
@@ -123,6 +135,7 @@ tests =
     , checkpointTests
     , durabilityTests
     , policyIndexTests
+    , cardanoRpcDecodeTests
     , cursorTests
     , valueTests
     ]
@@ -144,8 +157,10 @@ valueTests =
 prop_valueRoundTrip :: Property
 prop_valueRoundTrip = property $ do
   lovelace <- forAll (Gen.integral (Range.linear 0 (10 ^ (15 :: Int) :: Integer)))
-  entries <- forAll $ Gen.list (Range.linear 0 5) $
-    (,,) <$> genPolicyId <*> genAssetName <*> Gen.integral (Range.linear 1 (10 ^ (9 :: Int) :: Integer))
+  entries <-
+    forAll $
+      Gen.list (Range.linear 0 5) $
+        (,,) <$> genPolicyId <*> genAssetName <*> Gen.integral (Range.linear 1 (10 ^ (9 :: Int) :: Integer))
   let v =
         fromList $
           (AdaAssetId, Quantity lovelace)
@@ -155,7 +170,8 @@ prop_valueRoundTrip = property $ do
           (+)
           [((serialiseToRawBytes pid, serialiseToRawBytes name), q) | (pid, name, q) <- entries]
       expectedAssets =
-        sortOn (\(p, n, _) -> (p, n))
+        sortOn
+          (\(p, n, _) -> (p, n))
           [(p, n, q) | ((p, n), q) <- Map.toList grouped]
   decodeValue (encodeValue v) === Right (lovelace, expectedAssets)
 
@@ -254,6 +270,82 @@ policyIndexTests =
       \ORDER BY o.output_reference, i.policy_id, p.asset_name"
 
 -- ----------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Decoding cardano-rpc's native_bytes
+--
+-- The gRPC producer is handed raw CBOR where the ChainSync producer is handed
+-- an already-decoded 'BlockInMode', so this decode is the one step it has that
+-- the node path never did — and the only place an era or codec mismatch could
+-- silently produce the wrong block.
+--
+-- The fixtures are mainnet Byron blocks, borrowed from cardano-rpc's own test
+-- suite. Byron is deliberately the era under test: 'EpochSlots' is consumed on
+-- the Byron decoder arms and nowhere else, so a wrong codec config shows up
+-- here or not at all. The EBB pins it exactly — an epoch boundary block can
+-- only land on slot 2,160,000 if slots-per-epoch really is 21,600.
+
+goldenPath :: FilePath -> FilePath
+goldenPath name = "test" </> "golden" </> name
+
+-- | Decode a fixture, failing the test with the decoder's own error.
+decodeGolden :: ByteString -> IO BlockInMode
+decodeGolden bytes =
+  case decodeNativeBytes (cardanoCodecConfig mainnetByronEpochSlots) bytes of
+    Left err -> assertFailure ("decode failed: " <> show err)
+    Right block -> pure block
+
+blockSlot :: BlockInMode -> Word64
+blockSlot (BlockInMode _ block) =
+  case getBlockHeader block of BlockHeader (SlotNo slot) _ _ -> slot
+
+cardanoRpcDecodeTests :: TestTree
+cardanoRpcDecodeTests =
+  testGroup
+    "cardano-rpc native_bytes decoding"
+    [ testCase "a Byron regular block decodes to its own slot" $ do
+        bytes <- BS.readFile (goldenPath "byron-main-block.cbor")
+        block <- decodeGolden bytes
+        blockSlot block @?= 2161637
+    , testCase "a Byron epoch-boundary block decodes at an exact epoch boundary" $ do
+        bytes <- LBS.toStrict . GZip.decompress <$> LBS.readFile (goldenPath "byron-ebb.cbor.gz")
+        block <- decodeGolden bytes
+        -- 2,160,000 = 100 * 21,600. The equality is the assertion: it holds
+        -- only if the codec config carries the right slots-per-epoch.
+        blockSlot block @?= 100 * 21600
+    , -- Everything below is a rejection. A block is the whole payload, so
+      -- anything that is not exactly one block must fail rather than decode
+      -- some prefix and index a block nobody sent.
+      testCase "trailing bytes are rejected, not ignored" $ do
+        bytes <- BS.readFile (goldenPath "byron-main-block.cbor")
+        case decodeNativeBytes (cardanoCodecConfig mainnetByronEpochSlots) (bytes <> "\xff\xff") of
+          Left (TrailingBytes n) -> n @?= 2
+          Left err -> assertFailure ("wrong error: " <> show err)
+          Right _ -> assertFailure "decoded a block with trailing bytes"
+    , testCase "a truncated block is rejected" $ do
+        bytes <- BS.readFile (goldenPath "byron-main-block.cbor")
+        case decodeNativeBytes (cardanoCodecConfig mainnetByronEpochSlots) (BS.take 200 bytes) of
+          Left _ -> pure ()
+          Right _ -> assertFailure "decoded a truncated block"
+    , testCase "non-CBOR input is rejected" $
+        case decodeNativeBytes (cardanoCodecConfig mainnetByronEpochSlots) "not cbor at all" of
+          Left _ -> pure ()
+          Right _ -> assertFailure "decoded something that is not CBOR"
+    , -- Pins the behaviour for an era this build does not know about: a hard
+      -- failure that names the tag. Silently skipping such a block would
+      -- corrupt the index, and a vague error would be a bad afternoon.
+      --
+      -- It arrives as 'MalformedCbor' rather than 'BlockDecoderError' because
+      -- the hard-fork decoder raises it with @cborError@, which aborts the CBOR
+      -- decode itself instead of returning through the annotation stage.
+      testCase "an unknown era tag fails, naming the tag" $
+        -- [9, 0] : a two-element array whose era tag is past Dijkstra (8).
+        case decodeNativeBytes (cardanoCodecConfig mainnetByronEpochSlots) "\x82\x09\x00" of
+          Left err
+            | "unknown tag 9" `isInfixOf` show err -> pure ()
+            | otherwise -> assertFailure ("error did not name the tag: " <> show err)
+          Right _ -> assertFailure "decoded an unknown era"
+    ]
+
 -- Bulk durability flag
 -- ----------------------------------------------------------------------------
 
