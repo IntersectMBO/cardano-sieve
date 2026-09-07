@@ -1,4 +1,5 @@
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
 
 -- | Where the UTxO RPC server is, and how to connect to it. Separate from the
 -- follow loop so grapesy's connection types stay in one place.
@@ -64,15 +65,16 @@ toGrpcServer = \case
 -- | Connection parameters, almost entirely to raise the HTTP/2 windows.
 --
 -- This is the counterpart of ChainSync's @maxInFlight@, but bounded in bytes
--- rather than blocks. grapesy defaults to 256KiB per stream, which is small
--- against a mainnet block — and today every block also carries a parsed copy
--- sieve discards, since the server ignores @field_mask@
--- (IntersectMBO/cardano-api#1273). Too small means a WINDOW_UPDATE round trip
--- per block during catch-up.
+-- rather than blocks. Mainnet caps a block at 90,112 + 1,100 bytes, so grapesy's
+-- 256KiB default stream window holds about three of them — fine for following
+-- the tip, but during catch-up it means a WINDOW_UPDATE round trip every few
+-- blocks where ChainSync would have fifty in flight. Messages also run larger
+-- than the block itself while the server ignores @field_mask@ and sends a
+-- parsed copy alongside the raw bytes (IntersectMBO/cardano-api#1273).
 --
--- 8MiB is roughly 50 blocks, picked to match ChainSync's depth rather than from
--- measurement: sweep this first if throughput disappoints. Connection window
--- must be >= stream window or the two deadlock.
+-- 8MiB is ~90 max-size blocks, chosen to put the same order of work in flight
+-- as ChainSync rather than from measurement: sweep it first if throughput
+-- disappoints. Connection window must be >= stream window or the two deadlock.
 rpcConnParams :: GRPC.ConnParams
 rpcConnParams =
   def

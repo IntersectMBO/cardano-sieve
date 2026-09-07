@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -70,10 +71,12 @@ import Cardano.Sieve.Selector (Selector)
 import Control.Exception (bracket, throwIO)
 import Control.Monad (unless, void, when)
 import Data.Default (def)
+import Data.Functor ((<&>))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
+import Data.Proxy (Proxy (Proxy))
 import GHC.Clock (getMonotonicTime)
-import Network.GRPC.Client (Proxy (Proxy), recvOutput, sendFinalInput, withConnection, withRPC)
+import Network.GRPC.Client (recvOutput, sendFinalInput, withConnection, withRPC)
 import Network.GRPC.Common.Protobuf (Protobuf)
 import Network.GRPC.Common.StreamElem qualified as StreamElem
 
@@ -168,8 +171,6 @@ followTip endpoint dbPath batchSize durability redeemerCapture cliSelectors sinc
       -- At the tip a block lands every ~20s, so the batch counter would leave
       -- it unqueryable until 50,000 rows accumulated — never, at that rate.
       flushBatch dbHandle
-   where
-    (<&>) = flip fmap
 
   -- The node reports its live tip on every message, so unlike ChainSync this
   -- needs no inference from an empty pipeline. Height, not slot: slots can be

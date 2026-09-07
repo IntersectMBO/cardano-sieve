@@ -1,4 +1,5 @@
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Reading the wire messages of the UTxO RPC @FollowTip@ stream. Every
@@ -24,9 +25,8 @@ import Cardano.Rpc.Proto.Api.UtxoRpc.Sync qualified as U5c
 
 import Data.ByteString (ByteString)
 import Data.Function ((&))
-import Data.ProtoLens (defMessage)
 import Data.Word (Word64)
-import Network.GRPC.Common.Protobuf (Proto (Proto), getProto, (.~), (^.))
+import Network.GRPC.Common.Protobuf (Proto (Proto), defMessage, getProto, (.~), (^.))
 
 -- | What the server is telling us to do with the chain.
 data Action
@@ -84,14 +84,12 @@ streamedBlock block =
 -- action added to the protocol breaks the build instead of being dropped.
 responseAction :: Proto U5c.FollowTipResponse -> Maybe Action
 responseAction resp =
-  getProto
-    <$> (resp ^. U5c.maybe'action) <&> \case
-      U5c.FollowTipResponse'Apply block -> Apply (streamedBlock (mkProto block))
-      U5c.FollowTipResponse'Undo block -> Undo (streamedBlock (mkProto block))
-      U5c.FollowTipResponse'Reset ref -> Reset (blockRefPoint (mkProto ref))
+  fmap describe (getProto <$> resp ^. U5c.maybe'action)
  where
-  (<&>) = flip fmap
-  mkProto = id -- payloads inside the oneof are already unwrapped
+  describe = \case
+    U5c.FollowTipResponse'Apply block -> Apply (streamedBlock (Proto block))
+    U5c.FollowTipResponse'Undo block -> Undo (streamedBlock (Proto block))
+    U5c.FollowTipResponse'Reset ref -> Reset (blockRefPoint (Proto ref))
 
 -- | Absent only at origin.
 responseTip :: Proto U5c.FollowTipResponse -> ServerTip
