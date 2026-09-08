@@ -69,6 +69,8 @@ import Cardano.Sieve.Node.Progress
   , duration
   , heartbeatSeconds
   , logLine
+  , logStage
+  , logWarn
   , newProgress
   , summarise
   , tick
@@ -170,7 +172,7 @@ runSync socketPath networkId dbPath batchSize durability cliSelectors mkClient =
         -- selectors stored in the database, so a bare restart continues as before.
         selectors <- reconcileSelectors dbHandle cliSelectors
         progress <- newProgress
-        logLine
+        logStage
           ( "sync starting  db "
               <> dbPath
               <> "  batch-size "
@@ -182,7 +184,7 @@ runSync socketPath networkId dbPath batchSize durability cliSelectors mkClient =
         logLine ("indexing selectors: " <> describeSelectors selectors)
         case durability of
           UnsafeBulk ->
-            logLine
+            logWarn
               "bulk mode: journaling off for catch-up — a clean exit (Ctrl-C) is safe, \
               \but a crash means delete the database and resync"
           Durable -> pure ()
@@ -236,7 +238,7 @@ sieveBlock
   -> Maybe SlotNo
   -> BlockInMode
   -> IO BlockHeader
-sieveBlock dbHandle progress redeemerCapture policyIndexing selectors target blockInMode@(BlockInMode _ block) = do
+sieveBlock dbHandle progress redeemerCapture policyIndexing selectors target blockInMode@(BlockInMode cera block) = do
   let header = getBlockHeader block
       BlockHeader slotNo hash _blockNo = header
       selected = selectedStored selectors blockInMode
@@ -249,7 +251,7 @@ sieveBlock dbHandle progress redeemerCapture policyIndexing selectors target blo
     selected
     spent
     (datumsAndScriptsInBlock blockInMode)
-  tick progress slotNo target (length selected) (length spent)
+  tick progress slotNo target (show cera) (length selected) (length spent)
   pure header
 
 -- | Whether the deferred query indexes have been built yet. The follower builds
@@ -499,12 +501,12 @@ followingClient dbHandle progress redeemerCapture selectors since =
                 -- it happens with the heartbeat silenced (no blocks are being
                 -- rolled forward while it runs), so without these two lines
                 -- sieve looks hung at exactly the moment it finishes catching up.
-                logLine
+                logStage
                   "reached tip — deriving the policy index and building query indexes (this can take a few minutes)"
                 t0 <- getMonotonicTime
                 buildIndexesOn dbHandle
                 t1 <- getMonotonicTime
-                logLine
+                logStage
                   ( "policy + query indexes built in "
                       <> duration (t1 - t0)
                       <> " — database now durable (WAL), following the tip"
@@ -661,7 +663,7 @@ startPoints dbHandle since = case since of
       -- A header hash the current build cannot read means the row is not one we
       -- wrote. Start over rather than guess at it.
       (_, Nothing) -> do
-        logLine "checkpoints unreadable — starting from genesis"
+        logWarn "checkpoints unreadable — starting from genesis"
         pure [ChainPointAtGenesis]
  where
   toChainPoint (slot, hash) =
