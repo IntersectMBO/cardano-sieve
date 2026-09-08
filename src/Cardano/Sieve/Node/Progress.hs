@@ -7,6 +7,8 @@ module Cardano.Sieve.Node.Progress
   , summarise
   , heartbeatSeconds
   , logLine
+  , logStage
+  , logWarn
   , commas
   , duration
   )
@@ -16,12 +18,15 @@ import Cardano.Slotting.Slot (SlotNo, unSlotNo)
 
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (intercalate)
+import Data.Maybe (isNothing)
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Time.LocalTime (getCurrentTimeZone, utcToLocalTime)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTime)
 import Numeric (showFFloat)
+import System.Environment (lookupEnv)
+import System.IO (hIsTerminalDevice, stdout)
 
 -- | Rolling counters behind the periodic sync heartbeat.
 --
@@ -65,8 +70,8 @@ newProgress = do
 --
 -- @target@ is the slot the sync is heading for, when known — @--until@ for a
 -- bounded run, the server's tip for a following one — and drives the percentage.
-tick :: IORef Progress -> SlotNo -> Maybe SlotNo -> Int -> Int -> IO ()
-tick ref slotNo target outputs spends = do
+tick :: IORef Progress -> SlotNo -> Maybe SlotNo -> String -> Int -> Int -> IO ()
+tick ref slotNo target era outputs spends = do
   now <- getMonotonicTime
   pg <- readIORef ref
   let folded =
@@ -85,7 +90,8 @@ tick ref slotNo target outputs spends = do
           , pgBlocksAtReport = pgBlocks folded
           , pgSlotAtReport = unSlotNo slotNo
           }
-      logLine (progressLine folded now slotNo target)
+      palette <- paletteFor
+      logLine (progressLine palette folded now slotNo target era)
 
 -- | The heartbeat line, e.g.
 --
@@ -94,8 +100,8 @@ tick ref slotNo target outputs spends = do
 -- and once there is no target left to head for:
 --
 -- > 14:48:19  at tip    slot 3,999,989  12 blk/s  blocks 1,204,551  outputs 8,418,337  spends 7,205,118  elapsed 26m12s
-progressLine :: Progress -> Double -> SlotNo -> Maybe SlotNo -> String
-progressLine pg now slotNo target =
+progressLine :: Palette -> Progress -> Double -> SlotNo -> Maybe SlotNo -> String -> String
+progressLine palette pg now slotNo target era =
   case target of
     Just t | unSlotNo t > unSlotNo slotNo -> heading t
     -- No target, or we have caught up with it. A percentage and an ETA are
@@ -103,35 +109,45 @@ progressLine pg now slotNo target =
     -- reads like a stuck sync.
     _ -> atTip
  where
+  -- Labels dimmed, figures left bright: these lines are read by scanning the
+  -- numbers. 'pad' runs before any escape, or it pads the escape instead.
+  label = paint palette dim
+
   heading t =
-    "syncing   "
+    paint palette cyan "syncing"
+      <> "   "
       <> pad 6 (showFFloat (Just 1) (100 * ratio t) "%")
-      <> "  slot "
+      <> "  "
+      <> paint palette magenta era
+      <> label "  slot "
       <> commas (unSlotNo slotNo)
       <> "/"
       <> commas (unSlotNo t)
       <> "  "
       <> commas (round rate :: Word64)
-      <> " blk/s  eta "
+      <> label " blk/s  eta "
       <> eta t
       <> counters
 
   atTip =
-    "at tip    slot "
+    paint palette green "at tip"
+      <> "    "
+      <> paint palette magenta era
+      <> label "  slot "
       <> commas (unSlotNo slotNo)
       <> "  "
       <> commas (round rate :: Word64)
-      <> " blk/s"
+      <> label " blk/s"
       <> counters
 
   counters =
-    "  blocks "
+    label "  blocks "
       <> commas (pgBlocks pg)
-      <> "  outputs "
+      <> label "  outputs "
       <> commas (pgOutputs pg)
-      <> "  spends "
+      <> label "  spends "
       <> commas (pgSpends pg)
-      <> "  elapsed "
+      <> label "  elapsed "
       <> duration (now - pgStartedAt pg)
 
   ratio t = fromIntegral (unSlotNo slotNo) / fromIntegral (unSlotNo t) :: Double
@@ -155,7 +171,7 @@ summarise ref = do
   now <- getMonotonicTime
   pg <- readIORef ref
   let secs = max 1e-6 (now - pgStartedAt pg)
-  logLine
+  logStage
     ( "sync done  blocks "
         <> commas (pgBlocks pg)
         <> "  outputs "
@@ -177,10 +193,63 @@ summarise ref = do
 -- enough to line an event up against @cardano-node@'s own log without being
 -- noise.
 logLine :: String -> IO ()
-logLine msg = do
+logLine = emit Nothing
+
+-- | A change of stage: sync starting, tip reached, indexes finished. These are
+-- the lines worth scrolling back to; the heartbeat is what lies between them.
+logStage :: String -> IO ()
+logStage = emit (Just stage)
+
+-- | A warning, or a fallback being taken.
+logWarn :: String -> IO ()
+logWarn = emit (Just yellow)
+
+-- | Timestamp, two spaces, message. The timestamp is dimmed — it is on every
+-- line, so it is the part that should recede.
+emit :: Maybe Code -> String -> IO ()
+emit code msg = do
+  palette <- paletteFor
   now <- getCurrentTime
   tz <- getCurrentTimeZone
-  putStrLn (formatTime defaultTimeLocale "%H:%M:%S" (utcToLocalTime tz now) <> "  " <> msg)
+  let stamp = formatTime defaultTimeLocale "%H:%M:%S" (utcToLocalTime tz now)
+  putStrLn (paint palette dim stamp <> "  " <> maybe id (paint palette) code msg)
+
+-- | An SGR parameter string: @1;36@ is bold cyan.
+type Code = String
+
+dim, cyan, green, yellow, magenta, stage :: Code
+dim = "2"
+cyan = "36"
+green = "32"
+yellow = "33"
+magenta = "35"
+stage = "1;36"
+
+-- | Whether this run may put ANSI escapes in its log output.
+newtype Palette = Palette Bool
+
+-- | Colour when stdout is a terminal. @NO_COLOR@ set to anything disables it
+-- (<https://no-color.org>); @SIEVE_COLOR=always|never@ decides outright, and
+-- @always@ is for a piped stdout that a terminal is reading anyway.
+--
+-- Asked per line, not cached: three syscalls beside the 'getCurrentTimeZone'
+-- this module already does per line, once every 'heartbeatSeconds'.
+paletteFor :: IO Palette
+paletteFor = do
+  forced <- lookupEnv "SIEVE_COLOR"
+  suppressed <- lookupEnv "NO_COLOR"
+  tty <- hIsTerminalDevice stdout
+  pure . Palette $ case forced of
+    Just "always" -> True
+    Just "never" -> False
+    _ -> tty && isNothing suppressed
+
+-- | Wrap a string in an SGR code, or leave it alone when colour is off. Written
+-- out rather than taken from @ansi-terminal@: four codes and a reset is the
+-- whole vocabulary here.
+paint :: Palette -> Code -> String -> String
+paint (Palette False) _ s = s
+paint (Palette True) code s = "\ESC[" <> code <> "m" <> s <> "\ESC[0m"
 
 -- | Seconds as a compact human duration: @45s@, @6m12s@, @2h04m@.
 duration :: Double -> String
