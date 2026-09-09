@@ -1,3 +1,4 @@
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -12,10 +13,14 @@
 module Main (main) where
 
 import Cardano.Api
-  ( AddressAny
+  ( Address (ByronAddress)
+  , AddressAny (AddressByron)
   , AsType (AsAddressAny, AsAssetName, AsHash, AsPaymentKey, AsScriptHash, AsStakeKey, AsTxId)
   , AssetId (AdaAssetId, AssetId)
   , AssetName
+  , Block (ByronBlock)
+  , BlockInMode (BlockInMode)
+  , CardanoEra (ByronEra)
   , Hash
   , NetworkId (Mainnet)
   , PaymentCredential (PaymentCredentialByKey, PaymentCredentialByScript)
@@ -34,19 +39,39 @@ import Cardano.Api
   , Value
   , deserialiseAddress
   , deserialiseFromRawBytes
+  , lovelaceToValue
   , makeShelleyAddress
   , makeStakeAddress
   , serialiseAddress
   , serialiseToRawBytes
   , serialiseToRawBytesHexText
   , toAddressAny
+  , toByronTxId
   )
 
+import Cardano.Chain.Block qualified as CC
+import Cardano.Chain.Common qualified as Byron
+import Cardano.Chain.Epoch.File (mainnetEpochSlots)
+import Cardano.Chain.UTxO qualified as Utxo
+import Cardano.Ledger.Binary (byronProtVer, decodeFullDecoder, slice)
+import Cardano.Sieve.Node.Decode
+  ( DecodedOutput (..)
+  , byronOutputsInTx
+  , byronTxSpends
+  , datumsAndScriptsInBlock
+  , encodeOutputRef
+  , outputsInBlock
+  , spentInputs
+  , toContext
+  )
+import Cardano.Sieve.Node.Encode (toStored)
 import Cardano.Sieve.Node.Insert
-  ( DbHandle (dbConn)
+  ( DatumsAndScripts (dsDatums, dsScripts)
+  , DbHandle (dbConn)
   , DirtyDatabase
   , Durability (Durable, UnsafeBulk)
   , PolicyIndexing (DeferPolicies, MaintainPolicies)
+  , RedeemerCapture (CaptureRedeemers)
   , SelectorMismatch
   , SpentInput (..)
   , StoredOutput (..)
@@ -73,17 +98,22 @@ import Cardano.Sieve.Selector
   )
 import Cardano.Sieve.Server.Api.Matches (Cursor (..), cursorFromText, cursorToText)
 import Cardano.Sieve.Value (decodeValue, encodeValue)
+import Ouroboros.Consensus.Byron.Ledger (mkByronBlock)
 
+import Codec.Compression.GZip qualified as GZip
 import Control.Exception (bracket, bracket_, try)
 import Control.Monad (when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as LBS
 import Data.List (sortOn)
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Word (Word64)
 import Database.SQLite.Simple (Connection, Only (Only), Query, execute_, query_, withConnection)
 import GHC.Exts (fromList)
 import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
@@ -124,6 +154,8 @@ tests =
     , policyIndexTests
     , cursorTests
     , valueTests
+    , byronDecodeTests
+    , byronGoldenBlockTests
     ]
 
 -- ----------------------------------------------------------------------------
@@ -143,8 +175,10 @@ valueTests =
 prop_valueRoundTrip :: Property
 prop_valueRoundTrip = property $ do
   lovelace <- forAll (Gen.integral (Range.linear 0 (10 ^ (15 :: Int) :: Integer)))
-  entries <- forAll $ Gen.list (Range.linear 0 5) $
-    (,,) <$> genPolicyId <*> genAssetName <*> Gen.integral (Range.linear 1 (10 ^ (9 :: Int) :: Integer))
+  entries <-
+    forAll $
+      Gen.list (Range.linear 0 5) $
+        (,,) <$> genPolicyId <*> genAssetName <*> Gen.integral (Range.linear 1 (10 ^ (9 :: Int) :: Integer))
   let v =
         fromList $
           (AdaAssetId, Quantity lovelace)
@@ -154,7 +188,8 @@ prop_valueRoundTrip = property $ do
           (+)
           [((serialiseToRawBytes pid, serialiseToRawBytes name), q) | (pid, name, q) <- entries]
       expectedAssets =
-        sortOn (\(p, n, _) -> (p, n))
+        sortOn
+          (\(p, n, _) -> (p, n))
           [(p, n, q) | ((p, n), q) <- Map.toList grouped]
   decodeValue (encodeValue v) === Right (lovelace, expectedAssets)
 
@@ -837,3 +872,194 @@ prop_selectDelegationMatches = property $ do
   case credentialHashFromBytes =<< delegationHash a of
     Nothing -> success
     Just ch -> satisfies (ctxAt a) (SelectDelegation ch) === True
+
+-- ----------------------------------------------------------------------------
+-- Byron decode
+-- ----------------------------------------------------------------------------
+
+-- | The Byron arm of the decoder, one transaction at a time.
+byronDecodeTests :: TestTree
+byronDecodeTests =
+  testGroup
+    "Byron decode"
+    [ testCase "outputs carry the address, an ada-only value and their index" $ do
+        case byronOutputsInTx 7 (byronTx [byronRootIn] [1000000, 2500000]) of
+          [o0, o1] -> do
+            serialiseAddress (doAddress o0) @?= byronText
+            doValue o0 @?= lovelaceToValue 1000000
+            doValue o1 @?= lovelaceToValue 2500000
+            [ix | DecodedOutput{doOutputRef = TxIn _ (TxIx ix)} <- [o0, o1]] @?= [0, 1]
+            map doTransactionIndex [o0, o1] @?= [7, 7]
+          outs -> assertFailure ("expected two outputs, got " <> show (length outs))
+    , testCase "outputs carry no datum, reference script or metadata tag" $ do
+        case byronOutputsInTx 0 (byronTx [byronRootIn] [1000000]) of
+          [o] -> do
+            doDatum o @?= Nothing
+            doReferenceScriptHash o @?= Nothing
+            doMetadataTags o @?= Set.empty
+          outs -> assertFailure ("expected one output, got " <> show (length outs))
+    , testCase "stored form has NULL credentials and no assets" $ do
+        case toStored <$> byronOutputsInTx 0 (byronTx [byronRootIn] [1000000]) of
+          [row] -> do
+            -- NULL credentials are what the query-side bootstrap filter reads.
+            soPayCred row @?= Nothing
+            soDelegCred row @?= Nothing
+            soAssets row @?= []
+            soDatumHash row @?= Nothing
+            soReferenceScriptHash row @?= Nothing
+          rows -> assertFailure ("expected one row, got " <> show (length rows))
+    , testCase "the bare wildcard selects a Byron output, `*/*` does not" $ do
+        case byronOutputsInTx 0 (byronTx [byronRootIn] [1000000]) of
+          [o] -> do
+            satisfies (toContext o) (SelectAll IncludeBootstrap) @?= True
+            satisfies (toContext o) (SelectAll OnlyShelley) @?= False
+          outs -> assertFailure ("expected one output, got " <> show (length outs))
+    , testCase "a spend's consumed reference is the produced output's reference" $ do
+        let producer = byronTx [byronRootIn] [1000000, 2500000]
+        case byronOutputsInTx 0 producer of
+          [_o0, o1] -> do
+            let TxIn producerId _ = doOutputRef o1
+                spender = byronTx [Utxo.TxInUtxo (toByronTxId producerId) 1] [900000]
+            case byronTxSpends spender of
+              [s] -> do
+                siConsumed s @?= encodeOutputRef (doOutputRef o1)
+                siSpendingTxId s @?= spendingTxId spender
+                siRedeemer s @?= Nothing
+              spends -> assertFailure ("expected one spend, got " <> show (length spends))
+          outs -> assertFailure ("expected two outputs, got " <> show (length outs))
+    , testCase "spends are indexed in the transaction's own input order" $ do
+        -- 'otherTxid' sorts after 'txid', so listing it first is an order the
+        -- ledger's sorted order would not produce: Byron indexes the
+        -- transaction's own order.
+        let ins = [Utxo.TxInUtxo (toByronTxId otherTxid) 0, Utxo.TxInUtxo (toByronTxId txid) 0]
+        case byronTxSpends (byronTx ins [1000000]) of
+          [s0, s1] -> do
+            map siInputIndex [s0, s1] @?= [0, 1]
+            siConsumed s0 @?= encodeOutputRef (TxIn otherTxid (TxIx 0))
+            siConsumed s1 @?= encodeOutputRef (TxIn txid (TxIx 0))
+          spends -> assertFailure ("expected two spends, got " <> show (length spends))
+    ]
+
+-- | The Byron-ledger address behind the 'byronAddr' fixture.
+byronLedgerAddr :: Byron.Address
+byronLedgerAddr = case byronAddr of
+  AddressByron (ByronAddress a) -> a
+  other -> error ("byron fixture is not a Byron address: " <> show other)
+
+-- | A Byron transaction paying the given amounts to 'byronLedgerAddr'.
+-- Witnesses are empty; the decode path does not read them.
+byronTx :: [Utxo.TxIn] -> [Word64] -> Utxo.ATxAux ByteString
+byronTx ins amounts =
+  Utxo.annotateTxAux (Utxo.mkTxAux tx mempty)
+ where
+  tx =
+    Utxo.UnsafeTx
+      (NE.fromList ins)
+      (NE.fromList (mkOut <$> amounts))
+      (Byron.mkAttributes ())
+  mkOut n = Utxo.TxOut byronLedgerAddr (byronLovelace n)
+
+byronLovelace :: Word64 -> Byron.Lovelace
+byronLovelace n = either (error . show) id (Byron.mkLovelace n)
+
+-- | A stand-in input, for when only the transaction's outputs are under test.
+byronRootIn :: Utxo.TxIn
+byronRootIn = Utxo.TxInUtxo (toByronTxId txid) 0
+
+-- | The id of a Byron transaction, as a spend records it.
+spendingTxId :: Utxo.ATxAux ByteString -> ByteString
+spendingTxId atx = case byronOutputsInTx 0 atx of
+  DecodedOutput{doOutputRef = TxIn i _} : _ -> serialiseToRawBytes i
+  [] -> error "transaction has no outputs"
+
+-- ----------------------------------------------------------------------------
+-- Byron golden block
+-- ----------------------------------------------------------------------------
+
+-- | The Byron path from real block bytes to decoded rows, including the
+-- 'BlockInMode' dispatch the per-transaction tests cannot reach.
+--
+-- Both fixtures are mainnet blocks in the 'CC.ABlockOrBoundary' encoding the
+-- node's ImmutableDB stores, from cardano-rpc's golden files: block 2,160,150
+-- (epoch 100) with six transactions, and an epoch boundary block. The ids
+-- asserted below were verified against mainnet, so the output references are
+-- pinned to the chain rather than to this code.
+byronGoldenBlockTests :: TestTree
+byronGoldenBlockTests =
+  testGroup
+    "Byron golden block"
+    [ testCase "the six transactions' outputs, in block order" $ do
+        blk <- goldenBlock
+        let outs = outputsInBlock blk
+        length outs @?= 17
+        -- Grouped by transaction: 2,2,2,2,7,2.
+        map doTransactionIndex outs @?= [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 4, 4, 4, 4, 5, 5]
+        nubOrder [txIdHex o | o <- outs] @?= goldenTxIds
+        [ix | DecodedOutput{doOutputRef = TxIn _ (TxIx ix)} <- outs]
+          @?= [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 4, 5, 6, 0, 1]
+    , testCase "every output is a bootstrap address with an ada-only value" $ do
+        blk <- goldenBlock
+        let rows = map toStored (outputsInBlock blk)
+        -- Counted, not compared: these records have no Eq.
+        length (filter (not . null . soAssets) rows) @?= 0
+        length (filter ((/= Nothing) . soPayCred) rows) @?= 0
+        length (filter ((/= Nothing) . soDelegCred) rows) @?= 0
+        length (filter ((/= Nothing) . soDatumHash) rows) @?= 0
+        length (filter ((/= Nothing) . soReferenceScriptHash) rows) @?= 0
+    , testCase "the spends are the transactions' inputs, in transaction order" $ do
+        blk <- goldenBlock
+        -- Asking for redeemers must still yield none.
+        let spends = spentInputs CaptureRedeemers blk
+        length spends @?= 17
+        length (filter ((/= Nothing) . siRedeemer) spends) @?= 0
+        -- Inputs per transaction: 2,10,2,1,1,1 — the ten-input one is what
+        -- makes the order assertion meaningful.
+        map siInputIndex spends @?= [0, 1] <> [0 .. 9] <> [0, 1] <> [0] <> [0] <> [0]
+    , testCase "a Byron block carries no datums and no scripts" $ do
+        blk <- goldenBlock
+        let ds = datumsAndScriptsInBlock blk
+        dsDatums ds @?= []
+        dsScripts ds @?= []
+    , testCase "an epoch boundary block contributes nothing" $ do
+        blk <- goldenBoundaryBlock
+        length (outputsInBlock blk) @?= 0
+        length (spentInputs CaptureRedeemers blk) @?= 0
+    ]
+ where
+  txIdHex DecodedOutput{doOutputRef = TxIn i _} = serialiseToRawBytesHexText i
+  nubOrder = foldr (\x acc -> x : filter (/= x) acc) []
+
+-- | The golden block's transaction ids, in block order.
+goldenTxIds :: [Text]
+goldenTxIds =
+  [ "d2937ec5576f63094d066a3ad93997bf55e651d76b7dc4082a2cef5a85eae657"
+  , "649756d9194ecd79b017fa4753748d44da0d231d95b8f2b4a8e44d2cbab529c8"
+  , "c6304ae76fe6a0493f5236dee75b42b9ec33cd62782f2db455a36e40143a1d12"
+  , "734932fb26bbd9ec29d4f904285e6623e11e7a9751675f761c3b53a04f0c1a68"
+  , "c2ae415049dbc046c5650e6ba74e52dd2eef87f31f3712ccc220aa26c51a097a"
+  , "e54e392d7ed0f79bdff0342b2588be3eb899ca997364812e31651b4346038b1d"
+  ]
+
+goldenBlock :: IO BlockInMode
+goldenBlock = byronFixture id "test/files/golden/byron-main-block.cbor"
+
+goldenBoundaryBlock :: IO BlockInMode
+goldenBoundaryBlock = byronFixture GZip.decompress "test/files/golden/byron-ebb.cbor.gz"
+
+-- | Decode a Byron block fixture into the 'BlockInMode' a sync would hand the
+-- decoder. 'slice' re-attaches the original bytes, which is what makes the
+-- transaction ids come out right: they hash a transaction's own bytes.
+byronFixture :: (LBS.ByteString -> LBS.ByteString) -> FilePath -> IO BlockInMode
+byronFixture unwrap path = do
+  bytes <- unwrap <$> LBS.readFile path
+  case decodeFullDecoder
+    byronProtVer
+    "ABlockOrBoundary"
+    (CC.decCBORABlockOrBoundary mainnetEpochSlots)
+    bytes of
+    Left err -> assertFailure ("golden fixture " <> path <> " failed to decode: " <> show err)
+    Right blockOrBoundary ->
+      pure $
+        BlockInMode ByronEra $
+          ByronBlock $
+            mkByronBlock mainnetEpochSlots (LBS.toStrict . slice bytes <$> blockOrBoundary)

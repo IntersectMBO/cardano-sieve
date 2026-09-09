@@ -11,29 +11,40 @@ module Cardano.Sieve.Node.Decode
   , selectedOutputs
   , spentInputs
   , encodeOutputRef
+  , byronOutputsInTx
+  , byronTxSpends
   )
 where
 
 import Cardano.Api
-  ( AddressAny
+  ( Address (ByronAddress)
+  , AddressAny (AddressByron)
+  , Block (ByronBlock, ShelleyBlock)
   , BlockInMode (BlockInMode)
   , ShelleyBasedEra (..)
   , Tx (ShelleyTx)
+  , TxId
   , TxIn (TxIn)
   , TxIx (TxIx)
   , Value
+  , fromByronLovelace
+  , fromByronTxIn
   , fromLedgerValue
   , fromShelleyAddrToAny
   , fromShelleyScriptHash
   , fromShelleyTxIn
   , getBlockTxs
   , getTxIdShelley
+  , lovelaceToValue
   , serialiseToRawBytes
   , shelleyBasedEraConstraints
   )
+import Cardano.Api.Consensus qualified as Consensus
 import Cardano.Api.Experimental.Tx (TxOut (TxOut))
 import Cardano.Api.Ledger qualified as L
 
+import Cardano.Chain.Block qualified as CC
+import Cardano.Chain.UTxO qualified as Utxo
 import Cardano.Ledger.Alonzo.Core (originalBytes, scriptPrefixTag)
 import Cardano.Ledger.Alonzo.Scripts
   ( AsIx (AsIx)
@@ -82,11 +93,12 @@ data DecodedOutput = DecodedOutput
   -- so every output of the same transaction carries the same set; empty if none.
   }
 
--- | Every output of every transaction in a block. Byron blocks contribute
--- nothing ('getBlockTxs' is @[]@ for them).
+-- | Every output of every transaction in a block. 'getBlockTxs' is @[]@ for a
+-- Byron block and there is no @Tx ByronEra@, so Byron has its own arm.
 outputsInBlock :: BlockInMode -> [DecodedOutput]
-outputsInBlock (BlockInMode _ block) =
-  concat (zipWith outputsInTx [0 ..] (getBlockTxs block))
+outputsInBlock (BlockInMode _ block) = case block of
+  ByronBlock b -> concat (zipWith byronOutputsInTx [0 ..] (byronTxs b))
+  ShelleyBlock{} -> concat (zipWith outputsInTx [0 ..] (getBlockTxs block))
 
 -- | Decode every output of one transaction. Each output carries the
 -- transaction's id (in its output reference), its position within the block, and
@@ -190,7 +202,9 @@ outputsInTx txIx (ShelleyTx sbe ledgerTx) =
 -- block produced a matched output. Without that condition every datum and
 -- script on the chain would be stored no matter how narrow the selectors.
 datumsAndScriptsInBlock :: BlockInMode -> DatumsAndScripts
-datumsAndScriptsInBlock (BlockInMode _ block) = foldMap datumsAndScriptsInTx (getBlockTxs block)
+datumsAndScriptsInBlock (BlockInMode _ block) = case block of
+  ByronBlock{} -> mempty -- Byron has neither
+  ShelleyBlock{} -> foldMap datumsAndScriptsInTx (getBlockTxs block)
 
 -- | The datums and scripts of one transaction.
 datumsAndScriptsInTx :: Tx era -> DatumsAndScripts
@@ -264,8 +278,10 @@ selectedOutputs selectors blk =
 -- for /all/ inputs (an input carries no data to run a selector against); the
 -- writer keeps only the ones whose consumed output is tracked.
 spentInputs :: RedeemerCapture -> BlockInMode -> [SpentInput]
-spentInputs capture (BlockInMode _ block) =
-  concatMap (txSpends capture) (getBlockTxs block)
+spentInputs capture (BlockInMode _ block) = case block of
+  -- No redeemers in Byron, so 'capture' does not reach this arm.
+  ByronBlock b -> concatMap byronTxSpends (byronTxs b)
+  ShelleyBlock{} -> concatMap (txSpends capture) (getBlockTxs block)
 
 -- | The consumed inputs of one transaction, each tagged with the spending
 -- transaction's id, the input's index, and (when asked for) the redeemer that
@@ -349,3 +365,60 @@ encodeOutputRef :: TxIn -> ByteString
 encodeOutputRef (TxIn txid (TxIx ix)) =
   serialiseToRawBytes txid
     <> LBS.toStrict (toLazyByteString (word64BE (fromIntegral ix)))
+
+-- * Byron
+
+-- | The transaction payload of a Byron block; the other three payloads
+-- (delegation, update proposals, votes) are not outputs. Epoch boundary blocks
+-- carry none.
+--
+-- This order is the @transaction_index@ reported for Byron outputs.
+byronTxs :: Consensus.ByronBlock -> [Utxo.ATxAux ByteString]
+byronTxs blk = case Consensus.byronBlockRaw blk of
+  CC.ABOBBoundary _ebb -> []
+  CC.ABOBBlock b -> Utxo.aUnTxPayload (CC.blockTxPayload b)
+
+-- | The transaction's id. 'Consensus.byronIdTx' hashes its annotated bytes
+-- rather than re-serialising. The reference is a detour: cardano-api exposes
+-- the Byron id conversion only through 'fromByronTxIn', so the index below is a
+-- placeholder.
+byronTxId :: Utxo.ATxAux ByteString -> TxId
+byronTxId atx =
+  case fromByronTxIn (Utxo.TxInUtxo (Consensus.byronIdTx atx) 0) of
+    TxIn txid _ix -> txid
+
+-- | Decode every output of one Byron transaction, given its position in its
+-- block. A Byron output is an address and an ada-only value: no datum, no
+-- reference script, no metadata. The address is a bootstrap one, so
+-- 'Cardano.Sieve.Node.Encode.toStored' stores NULL for both credential columns.
+byronOutputsInTx :: Word64 -> Utxo.ATxAux ByteString -> [DecodedOutput]
+byronOutputsInTx txIx atx =
+  zipWith mkOutput [0 ..] (F.toList (Utxo.txOutputs (Utxo.taTx atx)))
+ where
+  txid = byronTxId atx
+  mkOutput ix o =
+    DecodedOutput
+      { doOutputRef = TxIn txid (TxIx ix)
+      , doTransactionIndex = txIx
+      , doAddress = AddressByron (ByronAddress (Utxo.txOutAddress o))
+      , doValue = lovelaceToValue (fromByronLovelace (Utxo.txOutValue o))
+      , doDatum = Nothing
+      , doReferenceScriptHash = Nothing
+      , doMetadataTags = Set.empty
+      }
+
+-- | The consumed inputs of one Byron transaction. With no redeemers there is no
+-- pointer for 'siInputIndex' to line up with, so it is the input's position in
+-- the transaction — the order Byron's UTxO rule consumes them in.
+byronTxSpends :: Utxo.ATxAux ByteString -> [SpentInput]
+byronTxSpends atx =
+  zipWith mkSpend [0 ..] (F.toList (Utxo.txInputs (Utxo.taTx atx)))
+ where
+  txid = serialiseToRawBytes (byronTxId atx)
+  mkSpend ix i =
+    SpentInput
+      { siConsumed = encodeOutputRef (fromByronTxIn i)
+      , siSpendingTxId = txid
+      , siInputIndex = ix
+      , siRedeemer = Nothing
+      }
