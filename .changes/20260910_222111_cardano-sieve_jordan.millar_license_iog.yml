@@ -1,6 +1,0 @@
-description: 'Align the licence files with cardano-api: same LICENSE text, add NOTICE,
-  declare license-files and copyright in the cabal file.'
-kind:
-- maintenance
-pr: 8
-project: cardano-sieve
