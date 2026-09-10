@@ -7,9 +7,13 @@ description:
   matching UTxO — when it was created, when it was spent, and by what.
   Single-threaded pipelined indexing architecture (ADR-020).
 license:            Apache-2.0
+license-file:       LICENSE
 author:             Jordan Millar
 maintainer:         jordan.millar@iohk.io
 build-type:         Simple
+tested-with:        GHC == 9.8.4
+extra-doc-files:    CHANGELOG.md
+                    README.md
 
 common project-config
   default-language: Haskell2010

@@ -5,11 +5,44 @@ tracks every matching UTxO — when it was created, when it was spent, and by
 what. It follows a local node over node-to-client ChainSync, writes matches
 into SQLite, and serves them over an HTTP API.
 
-## Building
+## Installation
+
+Pre-built, fully static Linux binaries are attached to every
+[GitHub Release](https://github.com/IntersectMBO/cardano-sieve/releases). They
+have no runtime dependencies and run on any x86_64 or aarch64 Linux distribution.
+
+| Platform        | Asset                                         |
+| --------------- | --------------------------------------------- |
+| `x86_64-linux`  | `cardano-sieve-A.B.C.D-x86_64-linux.tar.gz`  |
+| `aarch64-linux` | `cardano-sieve-A.B.C.D-aarch64-linux.tar.gz` |
+| macOS           | build from source (see below)                 |
 
 ```bash
-cabal build cardano-sieve -j4
+V=0.1.0.0; ARCH=x86_64   # or aarch64
+BASE=https://github.com/IntersectMBO/cardano-sieve/releases/download/cardano-sieve-$V
+curl -fLO "$BASE/cardano-sieve-$V-$ARCH-linux.tar.gz"
+curl -fLO "$BASE/cardano-sieve-$V-sha256sums.txt"
+sha256sum --check --ignore-missing "cardano-sieve-$V-sha256sums.txt"
+tar -xzf "cardano-sieve-$V-$ARCH-linux.tar.gz"
+./bin/cardano-sieve --version
 ```
+
+The tarball contains `bin/cardano-sieve`, the licence, and bash/zsh completion
+scripts under `share/`.
+
+## Building
+
+A regular dynamic build needs GHC 9.8, cabal, and the IOG crypto libraries
+(libsodium, libsecp256k1, libblst) on the linker path:
+
+```bash
+cabal build exe:cardano-sieve -j4
+```
+
+The static release binary is built with the same toolchain CI uses, IOG's
+[devx](https://github.com/input-output-hk/devx) shell, via
+`cabal.project.release`. See [RELEASING.md](RELEASING.md) for the exact
+commands and for how releases are cut.
 
 ## Usage
 
@@ -27,7 +60,7 @@ There is also `--build-indexes`, which installs the deferred query indexes on
 ### Indexing
 
 ```bash
-cabal run cardano-sieve -- \
+cardano-sieve \
   --socket-path ~/node.socket \
   --testnet-magic 2 \
   --database sieve.sqlite \
@@ -60,13 +93,13 @@ build them separately afterwards — `--build-indexes` does exactly that and
 then exits:
 
 ```bash
-cabal run cardano-sieve -- --database sieve.sqlite --build-indexes
+cardano-sieve --database sieve.sqlite --build-indexes
 ```
 
 ### Serving queries
 
 ```bash
-cabal run cardano-sieve -- --database sieve.sqlite --serve 1442
+cardano-sieve --database sieve.sqlite --serve 1442
 ```
 
 Serve-only mode never touches a node: `/health` reports the connection as

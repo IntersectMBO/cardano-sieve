@@ -46,6 +46,7 @@ import Control.Exception (AsyncException (UserInterrupt), bracket, throwTo)
 import Data.Bifunctor (first)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
+import Data.Version (showVersion)
 import Options.Applicative
   ( Parser
   , ParserInfo
@@ -63,6 +64,7 @@ import Options.Applicative
   , progDesc
   , showDefault
   , showDefaultWith
+  , simpleVersioner
   , strOption
   , switch
   , value
@@ -72,6 +74,8 @@ import System.Exit (die)
 import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
 import System.Posix.Signals (Handler (CatchOnce), installHandler, sigTERM)
 import Text.Read (readMaybe)
+
+import Paths_cardano_sieve (version)
 
 -- | What the process was asked to do.
 --
@@ -275,7 +279,7 @@ invocationOf raw =
 optionsInfo :: ParserInfo RawOptions
 optionsInfo =
   info
-    (optionsParser <**> helper)
+    (optionsParser <**> helper <**> simpleVersioner ("cardano-sieve " <> showVersion version))
     ( fullDesc
         <> progDesc
           "Follow a local node's chain, sieve each block's outputs against the \

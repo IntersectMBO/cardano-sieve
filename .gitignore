@@ -5,3 +5,6 @@ bench/
 .ghc.environment.*
 *.hi
 *.o
+cabal.project.release.local
+cabal.project.release.freeze
+dist-static/

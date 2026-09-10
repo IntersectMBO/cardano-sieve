@@ -1,0 +1,204 @@
+name: Build
+
+# Builds fully static Linux binaries (x86_64 and aarch64) inside IOG's devx
+# static shell when a cardano-sieve-A.B.C.D release tag is pushed (created by
+# the herald release flow, see RELEASING.md), and publishes a GitHub Release
+# with the tarballs, checksums, and the matching CHANGELOG.md section.
+# Run it manually (workflow_dispatch) for a dry run: it builds and uploads the
+# tarballs as workflow artifacts without creating a release.
+
+on:
+  push:
+    tags: ['cardano-sieve-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+env:
+  # devx flavour: musl GHC 9.8 + cabal, static libsodium-vrf, secp256k1, blst,
+  # gmp, zlib, openssl. The prebuilt shell closure is fetched from
+  # ghcr.io/input-output-hk/devx by the setup action; nothing is built with nix.
+  DEVX_COMPILER: ghc98
+  PROJECT: --project-file=cabal.project.release --builddir=dist-static
+jobs:
+  build:
+    name: Build (${{ matrix.arch }}-linux, static)
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    runs-on: ${{ matrix.arch == 'x86_64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 360
+    env:
+      # The musl cross compiler has to be named twice over: --with-compiler /
+      # --with-hc-pkg drive cabal's project-level compiler probe, while the
+      # --with-PROG forms reach per-package configure. Supplying only one set
+      # makes cabal fall back to a plain `ghc`/`ghc-pkg` on PATH for the other
+      # (none exists in the static shell). The shell's cabal wrapper adds the
+      # --with-PROG set itself via NIX_CABAL_FLAGS; spelling it out here keeps
+      # the build independent of that. `build` is deliberately not the first
+      # word: the wrapper's `cabal build` branch adds --disable-shared, which
+      # breaks dependency builds. Static linking comes from the project file.
+      CABAL_FLAGS: >-
+        --with-compiler=${{ matrix.arch }}-unknown-linux-musl-ghc
+        --with-hc-pkg=${{ matrix.arch }}-unknown-linux-musl-ghc-pkg
+        --with-ghc=${{ matrix.arch }}-unknown-linux-musl-ghc
+        --with-ghc-pkg=${{ matrix.arch }}-unknown-linux-musl-ghc-pkg
+        --with-hsc2hs=${{ matrix.arch }}-unknown-linux-musl-hsc2hs
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up devx static shell
+        # Installs nix, imports the prebuilt closure, and provides a `devx`
+        # wrapper that runs a script inside the shell (CABAL_DIR=~/.cabal-static).
+        uses: input-output-hk/actions/devx@dbb6ea6d50ffc37a2d481fd8047aff028bac3223 # 2026-02-28
+        with:
+          platform: ${{ matrix.arch }}-linux
+          target-platform: -static
+          compiler-nix-name: ${{ env.DEVX_COMPILER }}
+          minimal: true
+          iog: true
+
+      - name: Configure
+        # devx exports the cabal.project.local snippet static links need
+        # (pkg-config for zlib/digest/HsOpenSSL). The freeze file keys the cache.
+        shell: devx {0}
+        env:
+          TRIPLE: ${{ matrix.arch }}-unknown-linux-musl
+        run: |
+          set -euo pipefail
+          # cabal still reaches for a plain `ghc-pkg` on PATH in one code path
+          # regardless of the --with flags, and the static shell has only the
+          # triple-prefixed tools; give it musl-backed plain names. The runner's
+          # git is appended for the cardano-api source-repository-package.
+          mkdir -p "$HOME/.musl-bin"
+          for t in ghc ghc-pkg hsc2hs; do ln -sf "$(command -v "$TRIPLE-$t")" "$HOME/.musl-bin/$t"; done
+          export PATH="$HOME/.musl-bin:$PATH:/usr/bin:/bin"
+          echo "$CABAL_PROJECT_LOCAL_TEMPLATE" > cabal.project.release.local
+          echo "::group::toolchain"
+          echo "NIX_CABAL_FLAGS=${NIX_CABAL_FLAGS-<unset>}"
+          type ghc ghc-pkg hsc2hs cabal git
+          "$TRIPLE-ghc" --version
+          cabal --version
+          echo "::endgroup::"
+          cabal update
+          cabal $PROJECT $CABAL_FLAGS freeze
+
+      - name: Cache cabal store
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cabal-static/packages
+            ~/.cabal-static/store
+          key: cabal-static-${{ matrix.arch }}-linux-${{ env.DEVX_COMPILER }}-${{ hashFiles('cabal.project.release.freeze') }}
+          restore-keys: |
+            cabal-static-${{ matrix.arch }}-linux-${{ env.DEVX_COMPILER }}-
+
+      - name: Build
+        shell: devx {0}
+        env:
+          TRIPLE: ${{ matrix.arch }}-unknown-linux-musl
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.musl-bin:$PATH:/usr/bin:/bin"
+          cabal $PROJECT $CABAL_FLAGS build cardano-sieve:exe:cardano-sieve -j4
+          echo "BIN=$(cabal $PROJECT $CABAL_FLAGS list-bin cardano-sieve:exe:cardano-sieve)" >> "$GITHUB_ENV"
+
+      - name: Verify
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          file "$BIN"
+          file "$BIN" | grep -q 'statically linked'
+          "$BIN" --version
+          "$BIN" +RTS --info -RTS
+          if [[ "$REF_TYPE" == tag ]]; then
+            expected="cardano-sieve ${REF_NAME#cardano-sieve-}"
+            actual=$("$BIN" --version)
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error::binary reports '$actual' but tag $REF_NAME expects '$expected' (bump version: in cardano-sieve.cabal)"
+              exit 1
+            fi
+          fi
+
+      - name: Package
+        id: package
+        env:
+          ARCH: ${{ matrix.arch }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Tag cardano-sieve-A.B.C.D -> cardano-sieve-A.B.C.D-<arch>-linux.tar.gz
+          if [[ "$REF_TYPE" == tag ]]; then label="${REF_NAME#cardano-sieve-}"; else label="${SHA::7}"; fi
+          name="cardano-sieve-${label}-${ARCH}-linux"
+          mkdir -p dist/bin dist/share/cardano-sieve \
+                   dist/share/bash-completion/completions dist/share/zsh/site-functions
+          cp "$BIN" dist/bin/cardano-sieve
+          strip dist/bin/cardano-sieve
+          cp LICENSE dist/share/cardano-sieve/LICENSE
+          dist/bin/cardano-sieve --bash-completion-script cardano-sieve \
+            > dist/share/bash-completion/completions/cardano-sieve
+          dist/bin/cardano-sieve --zsh-completion-script cardano-sieve \
+            > dist/share/zsh/site-functions/_cardano-sieve
+          tar -czf "$name.tar.gz" -C dist bin share
+          ls -l "$name.tar.gz"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.name }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: cardano-sieve-*
+          merge-multiple: true
+
+      - name: Checksums and release notes
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ls -l cardano-sieve-*.tar.gz
+          version="${REF_NAME#cardano-sieve-}"
+          sha256sum cardano-sieve-*.tar.gz | tee "cardano-sieve-${version}-sha256sums.txt"
+          # Fails if CHANGELOG.md has no section for this version.
+          scripts/ci/extract-changelog.sh "$version" > RELEASE_NOTES.md
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Create release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ env.VERSION }}
+          body_path: RELEASE_NOTES.md
+          draft: false
+          fail_on_unmatched_files: true
+          files: |
+            cardano-sieve-*.tar.gz
+            cardano-sieve-*-sha256sums.txt

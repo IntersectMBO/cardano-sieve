@@ -1,0 +1,46 @@
+name: Release
+
+# Cuts a release the way cardano-api does, with herald: computes the next PVP
+# version from the changelog fragments (or takes an explicit one), creates a
+# release/cardano-sieve-A.B.C.D branch with the changelog section and cabal
+# version bump, and opens a release PR. Signing the commits and pushing the
+# cardano-sieve-A.B.C.D tag is done by hand from the PR's instructions; the
+# tag push then triggers the Build workflow, which publishes the binaries.
+# See RELEASING.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit version (A.B.C.D). Leave empty to compute from the changelog fragments.'
+        required: false
+        type: string
+      branch:
+        description: 'Branch to release from and target for the PR. Leave empty for the selected branch.'
+        required: false
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.branch || github.ref_name }}
+          fetch-depth: 0
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+
+      - uses: input-output-hk/cardano-dev/actions/herald-release@609046ca0378bdac28ff9abc4b42d7dcf9a96965 # herald-release-0.0.3.0
+        with:
+          package: cardano-sieve
+          version: ${{ inputs.version }}
+          base-branch: ${{ inputs.branch || github.ref_name }}
+          chap-instructions: false
