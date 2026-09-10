@@ -1,0 +1,26 @@
+-- Release build configuration: fully static Linux binaries.
+--
+-- Used by CI (.github/workflows/build.yml) via
+--   cabal --project-file=cabal.project.release build cardano-sieve:exe:cardano-sieve
+-- inside IOG's devx static shell (github:input-output-hk/devx#ghc98-static-minimal-iog),
+-- which supplies a musl GHC plus static libsodium-vrf, secp256k1, blst, gmp, zlib.
+--
+-- Kept separate from cabal.project so day-to-day dynamic builds are untouched:
+-- the flags below would otherwise force a rebuild of most of the dependency closure.
+import: cabal.project
+
+-- The devx static shell already links executables statically; this makes the
+-- intent explicit and fails loudly if the toolchain ever stops doing so.
+executable-static: True
+
+-- text's simdutf and formatting's double-conversion pull in a C++ runtime, which
+-- breaks static linking with musl.
+package text
+  flags: -simdutf
+
+package formatting
+  flags: +no-double-conversion
+
+-- blockio defaults to io_uring, which needs liburing at link time.
+constraints:
+  , any.blockio +serialblockio
