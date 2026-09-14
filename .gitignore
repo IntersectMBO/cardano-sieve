@@ -8,3 +8,5 @@ bench/
 cabal.project.release.local
 cabal.project.release.freeze
 dist-static/
+result*
+.pre-commit-config.yaml
