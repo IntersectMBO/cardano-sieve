@@ -5,3 +5,5 @@ bench/
 .ghc.environment.*
 *.hi
 *.o
+result*
+.pre-commit-config.yaml

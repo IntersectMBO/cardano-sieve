@@ -13,9 +13,8 @@ module Main (main) where
 
 import Cardano.Api
   ( AddressAny
-  , AdaAssetId
   , AsType (AsAddressAny, AsAssetName, AsHash, AsPaymentKey, AsScriptHash, AsStakeKey, AsTxId)
-  , AssetId (AssetId)
+  , AssetId (AdaAssetId, AssetId)
   , AssetName
   , Hash
   , NetworkId (Mainnet)
