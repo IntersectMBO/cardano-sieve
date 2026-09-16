@@ -1,0 +1,5 @@
+project: cardano-sieve
+pr: 10
+kind:
+  - maintenance
+description: Depend on cardano-api 11.7.0.0 from CHaP instead of a source-repository-package pin

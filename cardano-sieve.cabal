@@ -59,7 +59,7 @@ library
     , bech32                    ^>=1.1
     , bytestring               ^>=0.12
     , cborg                    ^>=0.2
-    , cardano-api              >=11.2
+    , cardano-api              >=11.7
     , cardano-ledger-alonzo
     , cardano-ledger-babbage
     , cardano-ledger-byron
@@ -103,8 +103,8 @@ test-suite cardano-sieve-test
   build-depends:
     , base            >=4.14
     , bytestring      ^>=0.12
-    , cardano-api     >=11.2
-    , cardano-api:gen >=11.2
+    , cardano-api     >=11.7
+    , cardano-api:gen >=11.7
     , cardano-ledger-binary
     , cardano-ledger-byron
     , cardano-sieve
