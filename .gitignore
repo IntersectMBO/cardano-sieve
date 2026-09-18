@@ -1,7 +1,13 @@
 dist-newstyle/
 cabal.project.local*
 notes/
-bench/
+# bench/ is machine-specific scratch, except the scripts the published
+# benchmark (BENCHMARKS.md) tells readers to run and the results it cites.
+bench/*
+!bench/run-node.sh
+!bench/run-sync-bench.sh
+!bench/run-published-bench.sh
+!bench/results/
 .ghc.environment.*
 *.hi
 *.o

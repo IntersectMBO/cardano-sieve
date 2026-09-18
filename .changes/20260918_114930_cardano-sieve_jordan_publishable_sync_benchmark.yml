@@ -1,0 +1,8 @@
+project: cardano-sieve
+pr: 11
+kind:
+  - documentation
+description: |
+  Add a publishable sync benchmark harness (bench/run-published-bench.sh,
+  KUPO_RTS override in bench/run-sync-bench.sh) and BENCHMARKS.md, linked
+  from the README. Numbers are filled in from the host run.
