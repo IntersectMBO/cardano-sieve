@@ -97,6 +97,9 @@
           hlint = "3.10";
         };
 
+        shell.buildInputs = lib.optionals nixpkgs.stdenv.hostPlatform.isLinux [
+          nixpkgs.liburing # io_uring is Linux only
+        ];
         shell.nativeBuildInputs = with nixpkgs; [git gh jq sqlite];
 
         shell.withHoogle = false;
