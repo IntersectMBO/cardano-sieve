@@ -118,17 +118,30 @@
     in
       lib.recursiveUpdate flake {
         # 'required' aggregate job
-        hydraJobs = 
+        ciJobs = 
           nixpkgs.callPackages inputs.iohkNix.utils.ciJobsAggregates {
             ciJobs = flake.hydraJobs;
             nonRequiredPaths = [];
-          };
+          } // flake.hydraJobs;
 
         packages.default = flake.packages."cardano-sieve:exe:cardano-sieve";
         apps.default = flake.apps."cardano-sieve:exe:cardano-sieve";
         project = cabalProject;
         formatter = nixpkgs.alejandra;
-      });
+      }) // {
+        hydraJobs =
+          let
+            pkgs = inputs.nixpkgs.legacyPackages."x86_64-linux";
+            allRequired = pkgs.callPackages inputs.iohkNix.utils.ciJobsAggregates {
+              ciJobs = 
+                builtins.mapAttrs 
+                (_: builtins.getAttr "required")
+                inputs.self.ciJobs;
+            };
+          in inputs.self.ciJobs // {
+            inherit (allRequired) required;
+          };
+        };
 
   nixConfig = {
     extra-substituters = [
