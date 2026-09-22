@@ -1,22 +1,5 @@
 {
   "nodes": {
-    "CHaP": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1789604756,
-        "narHash": "sha256-65Tjhgm7StVkrek4aq8pvJ+OGkgREMFRFoIeXzyJyf4=",
-        "owner": "intersectmbo",
-        "repo": "cardano-haskell-packages",
-        "rev": "24dc50911743edb8dc5389f177385ed19ec6519a",
-        "type": "github"
-      },
-      "original": {
-        "owner": "intersectmbo",
-        "ref": "repo",
-        "repo": "cardano-haskell-packages",
-        "type": "github"
-      }
-    },
     "HTTP": {
       "flake": false,
       "locked": {
@@ -100,23 +83,24 @@
         "type": "github"
       }
     },
-    "flake-compat": {
+    "chap": {
       "flake": false,
       "locked": {
-        "lastModified": 1767039857,
-        "narHash": "sha256-vNpUSpF5Nuw8xvDLj2KCwwksIbjua2LZCqhV1LNRDns=",
-        "owner": "edolstra",
-        "repo": "flake-compat",
-        "rev": "5edf11c44bc78a0d334f6334cdaf7d60d732daab",
+        "lastModified": 1789604756,
+        "narHash": "sha256-65Tjhgm7StVkrek4aq8pvJ+OGkgREMFRFoIeXzyJyf4=",
+        "owner": "intersectmbo",
+        "repo": "cardano-haskell-packages",
+        "rev": "24dc50911743edb8dc5389f177385ed19ec6519a",
         "type": "github"
       },
       "original": {
-        "owner": "edolstra",
-        "repo": "flake-compat",
+        "owner": "intersectmbo",
+        "ref": "repo",
+        "repo": "cardano-haskell-packages",
         "type": "github"
       }
     },
-    "flake-compat_2": {
+    "flake-compat": {
       "flake": false,
       "locked": {
         "lastModified": 1672831974,
@@ -133,7 +117,7 @@
         "type": "github"
       }
     },
-    "flake-compat_3": {
+    "flake-compat_2": {
       "flake": false,
       "locked": {
         "lastModified": 1767039857,
@@ -238,7 +222,7 @@
         "cabal-34": "cabal-34",
         "cabal-36": "cabal-36",
         "cardano-shell": "cardano-shell",
-        "flake-compat": "flake-compat_2",
+        "flake-compat": "flake-compat",
         "hackage": [
           "hackageNix"
         ],
@@ -263,7 +247,8 @@
         "hpc-coveralls": "hpc-coveralls",
         "iserv-proxy": "iserv-proxy",
         "nixpkgs": [
-          "nixpkgs"
+          "haskellNix",
+          "nixpkgs-unstable"
         ],
         "nixpkgs-2305": "nixpkgs-2305",
         "nixpkgs-2311": "nixpkgs-2311",
@@ -564,7 +549,9 @@
     "iohkNix": {
       "inputs": {
         "blst": "blst",
-        "nixpkgs": "nixpkgs",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
         "secp256k1": "secp256k1",
         "sodium": "sodium"
       },
@@ -601,16 +588,16 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1751071626,
-        "narHash": "sha256-/uHE/AD2qGq4QLigWAnBHiVvpVXB04XAfrOtw8JMv+Y=",
-        "owner": "nixos",
+        "lastModified": 1787631388,
+        "narHash": "sha256-vMiXptXarfSdJb1Gkc+FYVOAibuBRj7qxGa8z68q1Uw=",
+        "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "a47938d89bdf8e279ad432bd6a473cf4c430f48c",
+        "rev": "ac6b2166e7a9375683b8e98f860f273222337b16",
         "type": "github"
       },
       "original": {
-        "owner": "nixos",
-        "ref": "release-25.05",
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
         "repo": "nixpkgs",
         "type": "github"
       }
@@ -743,38 +730,6 @@
         "type": "github"
       }
     },
-    "nixpkgs_2": {
-      "locked": {
-        "lastModified": 1748026580,
-        "narHash": "sha256-rWtXrcIzU5wm/C8F9LWvUfBGu5U5E7cFzPYT1pHIJaQ=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "11cb3517b3af6af300dd6c055aeda73c9bf52c48",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "11cb3517b3af6af300dd6c055aeda73c9bf52c48",
-        "type": "github"
-      }
-    },
-    "nixpkgs_3": {
-      "locked": {
-        "lastModified": 1787631388,
-        "narHash": "sha256-vMiXptXarfSdJb1Gkc+FYVOAibuBRj7qxGa8z68q1Uw=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "ac6b2166e7a9375683b8e98f860f273222337b16",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "ref": "nixpkgs-unstable",
-        "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
     "old-ghc-nix": {
       "flake": false,
       "locked": {
@@ -794,8 +749,8 @@
     },
     "pre-commit-hooks": {
       "inputs": {
-        "flake-compat": "flake-compat_3",
-        "nixpkgs": "nixpkgs_3"
+        "flake-compat": "flake-compat_2",
+        "nixpkgs": "nixpkgs"
       },
       "locked": {
         "lastModified": 1788267358,
@@ -813,13 +768,15 @@
     },
     "root": {
       "inputs": {
-        "CHaP": "CHaP",
-        "flake-compat": "flake-compat",
+        "chap": "chap",
         "flake-utils": "flake-utils",
         "hackageNix": "hackageNix",
         "haskellNix": "haskellNix",
         "iohkNix": "iohkNix",
-        "nixpkgs": "nixpkgs_2",
+        "nixpkgs": [
+          "haskellNix",
+          "nixpkgs-unstable"
+        ],
         "pre-commit-hooks": "pre-commit-hooks"
       }
     },
