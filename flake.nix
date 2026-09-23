@@ -83,6 +83,8 @@
           active-repositories: hackage.haskell.org, cardano-haskell-packages-local
         '';
 
+        crossPlatforms = p: lib.optional (system == "x86_64-linux") p.musl64;
+
         shell = {
           tools = {
             cabal = "3.16.1.0";
@@ -106,6 +108,8 @@
           # Set to true to build a hoogle index, then start it with
           # `nix develop . -c hoogle -- server --local`
           withHoogle = false;
+
+          crossPlatforms = _: [];
 
           shellHook = ''
             ${pre-commit-check.shellHook}
