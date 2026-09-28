@@ -66,7 +66,7 @@
         };
       };
 
-      cabalProject = nixpkgs.haskell-nix.cabalProject' {
+      cabalProject = (nixpkgs.haskell-nix.cabalProject' {
         src = ./.;
         name = "cardano-sieve";
         compiler-nix-name = defaultCompiler;
@@ -83,7 +83,9 @@
           active-repositories: hackage.haskell.org, cardano-haskell-packages-local
         '';
 
-        crossPlatforms = p: lib.optional (system == "x86_64-linux") p.musl64;
+        crossPlatforms = p: 
+          lib.optional (system == "x86_64-linux") p.musl64
+          ++ lib.optional (system == "aarch64-linux") p.aarch64-multiplatform-musl;
 
         shell = {
           tools = {
@@ -115,9 +117,58 @@
             ${pre-commit-check.shellHook}
           '';
         };
-      };
+      }).appendOverlays [
+        # Add `exes` to project
+        nixpkgs.haskell-nix.haskellLib.projectOverlays.projectComponents
+      ];
 
       flake = cabalProject.flake {};
+
+      mkDist = platform: project:
+        let
+          inherit (project.exes) cardano-sieve;
+          inherit (cardano-sieve.identifier) version;
+          inherit (cabalProject.args) src;
+        in
+          nixpkgs.runCommand 
+            "cardano-sieve-linux" 
+            { nativeBuildInputs = with nixpkgs; [ bintools ]; }
+            ''
+              mkdir -p \
+                $out \
+                release/bin \
+                release/share/cardano-sieve \
+                release/share/bash-completion/completions \
+                release/share/zsh/site-functions
+
+              # Copy over static binary
+              cp -r "${cardano-sieve}/bin/cardano-sieve" release/bin/cardano-sieve
+              # Copy over LICENSE
+              cp "${src}/LICENSE" "release/share/cardano-sieve/LICENSE"
+              # Write bash completion script
+              release/bin/cardano-sieve --bash-completion-script cardano-sieve \
+                > release/share/bash-completion/completions/cardano-sieve
+              # Write zsh completion script
+              release/bin/cardano-sieve --zsh-completion-script cardano-sieve \
+                > release/share/zsh/site-functions/_cardano-sieve
+
+              # Package up assets
+              dist_file="$out/cardano-sieve-${version}-${platform}.tar.gz"
+              tar czf "$dist_file" -C release bin share
+
+              # Write summary file for Hydra
+              mkdir $out/nix-support
+              echo "file binary-dist" "$dist_file" \
+                > $out/nix-support/hydra-build-products
+            '';
+
+      muslProject =
+        if system == "x86_64-linux" then
+          cabalProject.projectCross.musl64
+        else if system == "aarch64-linux" then
+          cabalProject.projectCross.aarch64-multiplatform-musl
+        else
+          null;
 
     in
       lib.recursiveUpdate flake {
@@ -126,12 +177,23 @@
           nixpkgs.callPackages inputs.iohkNix.utils.ciJobsAggregates {
             ciJobs = flake.hydraJobs;
             nonRequiredPaths = [];
+          } // lib.optionalAttrs (lib.hasSuffix "-linux" system) {
+            cardano-sieve-linux = mkDist system muslProject;
+          } // lib.optionalAttrs (lib.hasSuffix "-darwin" system) {
+            cardano-sieve-macos = mkDist system cabalProject;
           } // flake.hydraJobs;
 
-        packages.default = flake.packages."cardano-sieve:exe:cardano-sieve";
-        apps.default = flake.apps."cardano-sieve:exe:cardano-sieve";
         project = cabalProject;
+
+        apps.default = flake.apps."cardano-sieve:exe:cardano-sieve";
         formatter = nixpkgs.alejandra;
+        packages = {
+          default = flake.packages."cardano-sieve:exe:cardano-sieve";
+        } // lib.optionalAttrs (lib.hasSuffix "-linux" system) {
+          cardano-sieve-linux = mkDist system muslProject;
+        } // lib.optionalAttrs (lib.hasSuffix "-darwin" system) {
+          cardano-sieve-macos = mkDist system cabalProject;
+        };
       }) // {
         hydraJobs =
           let
