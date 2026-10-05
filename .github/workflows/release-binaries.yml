@@ -1,0 +1,104 @@
+name: Upload static binaries to release
+
+on:
+  push:
+    tags:
+      - '**'
+  release:
+    types:
+      - published
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  checks: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  wait-for-hydra:
+    name: "Wait for hydra check runs"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: input-output-hk/actions/wait-for-hydra@ba180de21cea2d34b37f1247ea59be406e14233c # 2026-10-02
+        with:
+          check: 'ci/hydra-build:required'
+
+  download:
+    name: "Download ${{ matrix.system }} binary distribution"
+    needs: [wait-for-hydra]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { system: x86_64-linux,   attr: cardano-sieve-linux }
+          - { system: aarch64-linux,  attr: cardano-sieve-linux }
+          - { system: aarch64-darwin, attr: cardano-sieve-macos }
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          # Hydra builds the head commit, not the PR's merge commit
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+
+      - name: Download archive from cache
+        env:
+          SYSTEM: ${{ matrix.system }}
+          ATTR: ${{ matrix.attr }}
+        run: |
+          # Fetch the artifact from cache.iog.io. Fails if it isn't in the Nix cache
+          # (via `--builders "" --max-jobs 0`)
+          nix build \
+            --builders "" \
+            --max-jobs 0 \
+            ".#packages.${SYSTEM}.${ATTR}"
+
+          # Copy it out of the nix store
+          mkdir -p assets
+          cp result/cardano-sieve-*.tar.gz assets/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.system }}
+          path: assets/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  upload:
+    name: "Upload assets to the release"
+    needs: [download]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Record checksums
+        env:
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        run: |
+          cd assets # Make sure paths stay bare
+          sha256sum cardano-sieve-*.tar.gz \
+            | tee "cardano-sieve-${TAG#cardano-sieve-}-sha256sums.txt"
+
+      - name: Release
+        # TODO: Enable after this is verified. Be sure to disable it in `build.yml`
+        # if: github.event_name == 'release'
+        if: false
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          fail_on_unmatched_files: true
+          files: |
+            assets/cardano-sieve-*.tar.gz
+            assets/cardano-sieve-*-sha256sums.txt
