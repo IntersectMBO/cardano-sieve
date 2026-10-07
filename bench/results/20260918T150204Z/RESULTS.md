@@ -1,0 +1,44 @@
+# Sync benchmark results, 20260918T150204Z
+
+```
+date_utc:        20260918T150204Z
+network:         testnet-magic 2
+range:           origin..4000000 (selector: everything)
+runs:            5 per tool per config, interleaved, median; cooldown 30s
+kupo_rts:        default -N2
+sieve:           c6abf1182853 (bench/publishable-sync-bench)
+kupo:            2a8d635216ef (setup-for-hydra)
+cardano-node:    cardano-node 11.0.1 - linux-x86_64 - ghc-9.6
+cardano-cli:     cardano-cli 11.2.3.0 - linux-x86_64 - ghc-9.6
+ghc:             9.8.4 (ghc-9.8.4)
+node_tip_slot:   123087580
+cpu:             12th Gen Intel(R) Core(TM) i7-1260P
+cores_visible:   16
+ram:             62 GiB
+root_disk:       /dev/nvme1n1p2 (rotational=0)
+kernel:          6.18.7-76061807-generic
+virtualisation:  none
+loadavg_start:   2.72 2.88 3.81   (1/5/15 min averages, read before the builds)
+elapsed_default: 28m34s
+elapsed_N2: 27m42s
+elapsed_total:   56m16s
+loadavg_end:     2.77 2.75 2.38   (1/5/15 min averages)
+```
+
+## kupo RTS: default
+
+Correctness gate: outputs-ever: sieve=1627464 kupo=1627464 | unspent: sieve=386569 kupo=386569 | (output,policy) pairs: sieve=1852726 kupo=1852726
+
+| tool | sync wall (s) | sync CPU (s) | CPU % | derive (s) | time-to-queryable (s) | peak RSS (MiB) | db (MiB) |
+|---|---|---|---|---|---|---|---|
+| sieve | 104.6 | 110.9 | 106% | 10.6 | 115.2 | 124 | 1097 |
+| kupo | 142.8 | 121.9 | 85% | - | 142.8 | 454 | 922 |
+
+## kupo RTS: -N2
+
+Correctness gate: outputs-ever: sieve=1627464 kupo=1627464 | unspent: sieve=386569 kupo=386569 | (output,policy) pairs: sieve=1852726 kupo=1852726
+
+| tool | sync wall (s) | sync CPU (s) | CPU % | derive (s) | time-to-queryable (s) | peak RSS (MiB) | db (MiB) |
+|---|---|---|---|---|---|---|---|
+| sieve | 105.8 | 111.3 | 105% | 10.8 | 116.5 | 124 | 1097 |
+| kupo | 131.4 | 131.8 | 100% | - | 131.4 | 453 | 922 |

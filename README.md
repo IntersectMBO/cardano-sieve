@@ -5,6 +5,11 @@ tracks every matching UTxO — when it was created, when it was spent, and by
 what. It follows a local node over node-to-client ChainSync, writes matches
 into SQLite, and serves them over an HTTP API.
 
+## Benchmarks
+
+Head-to-head sync numbers against kupo, with the exact commands and
+hardware, are in [BENCHMARKS.md](BENCHMARKS.md).
+
 ## Installation
 
 Pre-built, fully static Linux binaries are attached to every
